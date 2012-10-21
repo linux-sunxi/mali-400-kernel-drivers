@@ -19,6 +19,8 @@
 #include "common/essl_type.h"
 #include "common/symbol_table.h"
 #include "middle/dominator.h"
+#include "maligp2/maligp2_instruction.h"
+#include "maligp2/maligp2_target.h"
 
 /**
  * This file includes implementation of the pilot shading optimization.
@@ -390,7 +392,6 @@ static memerr add_to_hoist_points(pilot_calculations_context *ctx,
 {
 	if(is_const)
 	{
-		int tmp_weight;
 		run_time_nodes_list * prev_rt_node_elem;
 		if(succ == ctx->cfg->exit_block->source)
 		{
@@ -407,6 +408,7 @@ static memerr add_to_hoist_points(pilot_calculations_context *ctx,
 		(*calc_weight) += weight;
 		if(succ != n)
 		{
+			int tmp_weight = 0;
 			ESSL_CHECK(find_last_fully_const_succ(ctx, succ, rtc_elem, &tmp_weight));
 			(*calc_weight) += tmp_weight;
 		}
@@ -475,7 +477,7 @@ static memerr find_last_fully_const_succ(pilot_calculations_context *ctx, node *
 					/* loop structure: don't work with loops as it means that we should modife control flow*/
 					rtc_elem->orig_rt_node = NULL;
 					_essl_ptrset_clear(&ctx->hoist_points);
-					return -1;
+					return MEM_OK;
 				}
 				is_const = ESSL_FALSE;
 			}else if(succ->hdr.kind == EXPR_KIND_STORE)
@@ -533,7 +535,7 @@ static memerr find_last_point_for_hoisting_out(pilot_calculations_context *ctx)
 	for(elem = ctx->rtc_nodes; elem != NULL; elem = elem_n)
 	{
 		/* for each  rt constant candidate*/
-		int tmp_weight;
+		int tmp_weight = 0;
 		node_succs_list *succs_list;
 		elem_n = elem->next;
 		weight = get_node_pilot_weight(elem->node);
@@ -650,7 +652,7 @@ static node * copy_rtc_node(pilot_calculations_context *ctx, node *n)
 	{
 		node *pred, *copy_pred;
 		pred = GET_CHILD(n, i);
-		copy_pred = copy_rtc_node(ctx, pred);
+		ESSL_CHECK(copy_pred = copy_rtc_node(ctx, pred));
 		SET_CHILD(res, i, copy_pred);
 	}
 	ESSL_CHECK(_essl_ptrdict_insert(&ctx->copied, n, res));
@@ -704,7 +706,7 @@ static memerr move_calculations_to_pilot_shader(pilot_calculations_context *ctx,
 		sym->opt.pilot.proactive_uniform_num = num;
 		ESSL_CHECK(sym_list = LIST_NEW(ctx->pool, symbol_list));
 		sym_list->sym = sym;
-		LIST_INSERT_BACK(ctx->tu->uniforms, sym_list);
+		LIST_INSERT_BACK(&ctx->tu->uniforms, sym_list);
 
 		/* creating a load for the pilot uniform */
 		ESSL_CHECK(address = _essl_new_variable_reference_expression(ctx->pool, sym));
@@ -739,7 +741,7 @@ static memerr move_calculations_to_pilot_shader(pilot_calculations_context *ctx,
 		sym->opt.pilot.proactive_uniform_num = num;
 		ESSL_CHECK(sym_list = LIST_NEW(ctx->pool, symbol_list));
 		sym_list->sym = sym;
-		LIST_INSERT_BACK(ctx->tu->globals, sym_list);
+		LIST_INSERT_BACK(&ctx->tu->globals, sym_list);
 
 		/* creating a load for the pilot variable */
 		ESSL_CHECK(address = _essl_new_variable_reference_expression(ctx->pool, sym));
@@ -918,43 +920,7 @@ static memerr collect_rt_nodes(pilot_calculations_context *ctx, node *n, basic_b
 			rtc_elem->orig_func = ctx->func;
 			LIST_INSERT_FRONT(&ctx->rtc_nodes, rtc_elem);
 		}
-	}else if(0) /* disabled because MJOLL-2516 */
-	{
-		ptrdict_iter it;
-		ptrdict_entry *entry;
-		node *nn;
-		_essl_ptrdict_iter_init(&it, &ctx->rt_const_nodes);
-		while((entry = _essl_ptrdict_next_entry(&it)) != NULL)
-		{
-
-			node_succs_list *succs_list;
-			run_time_constant_node *rtc_elem;
-			essl_bool has_succs;
-			nn = _essl_ptrdict_get_key(entry);
-			if( nn == NULL)
-			{
-				break;
-			}
-			if(is_addressing_op(nn))
-			{
-				continue;
-			}
-
-			succs_list = find_rt_const_succs(ctx, nn, &has_succs);
-			if(has_succs) /* non null variant should be further optimized */
-			{
-				ESSL_CHECK(rtc_elem = LIST_NEW(ctx->temp_pool, run_time_constant_node));
-				rtc_elem->node = nn;
-				rtc_elem->orig_rt_node = nn;
-				rtc_elem->orig_rt_bb = block;
-				rtc_elem->orig_func = ctx->func;
-				LIST_INSERT_FRONT(&ctx->rtc_nodes, rtc_elem);
-			}
-
-		}
-
 	}
-
 	return MEM_OK;
 
 }
@@ -1097,6 +1063,35 @@ static memerr find_constant_input_calculations_for_func(pilot_calculations_conte
 }
 
 /**
+ * Check if we already have too many uniforms in a GP2 shader
+ */
+static essl_bool is_too_many_uniforms(translation_unit *tu)
+{
+	symbol_list *sl;
+	symbol *sym;
+	unsigned int total_size = 0;
+	for(sl = tu->globals; sl != NULL; sl = sl->next)
+	{
+		sym = sl->sym;
+		total_size +=_essl_maligp2_get_type_size(tu->desc, sym->type, sym->address_space);
+
+	}
+	for(sl = tu->uniforms; sl != NULL; sl = sl->next)
+	{
+		sym = sl->sym;
+		total_size +=_essl_maligp2_get_type_size(tu->desc, sym->type, sym->address_space);
+	}
+
+	if(total_size > (unsigned int)(tu->desc->options->n_maligp2_constant_registers - 10)*MALIGP2_NATIVE_VECTOR_SIZE)
+	{
+		return ESSL_TRUE;
+	}
+
+	return ESSL_FALSE;
+
+}
+
+/**
  * Driver function for the optimization
  * To be called from middle passes run.
  */
@@ -1112,6 +1107,14 @@ memerr _essl_optimise_constant_input_calculations(pass_run_context *pr_ctx, tran
 	ctx.ts_ctx = pr_ctx->ts_ctx;
 	ctx.rtc_nodes = NULL;
 	ctx.applied = ESSL_FALSE;
+
+	if(ctx.desc->kind == TARGET_VERTEX_SHADER)
+	{
+		if(is_too_many_uniforms(tu))
+		{
+			return MEM_OK;
+		}
+	}
 
 	ESSL_CHECK(_essl_ptrdict_init(&ctx.node_succs, pr_ctx->tmp_pool));
 	ESSL_CHECK(_essl_ptrset_init(&ctx.visited, pr_ctx->tmp_pool));

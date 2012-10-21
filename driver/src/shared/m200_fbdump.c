@@ -214,10 +214,18 @@ MALI_EXPORT mali_bool _mali_fbdump_is_requested(mali_frame_builder* fbuilder)
 	 */
 	const u8 type = (fbuilder->identifier >> 24) & 0xFF;
 
-	if (!( MALI_FRAME_BUILDER_TYPE_EGL_COMPOSITOR == type || MALI_FRAME_BUILDER_TYPE_EGL_WINDOW == type))
+#if defined(HAVE_ANDROID_OS)
+	if (MALI_FRAME_BUILDER_TYPE_EGL_COMPOSITOR != type)
 	{
 		return MALI_FALSE;
 	}
+#else
+	if (MALI_FRAME_BUILDER_TYPE_EGL_WINDOW != type)
+	{
+		return MALI_FALSE;
+	}
+#endif
+
 #else
 #error "MALI_TIMELINE_PROFILING_ENABLED must be enabled to use MALI_FRAMEBUFFER_DUMP_ENABLED."
 #endif /* MALI_TIMELINE_PROFILING_ENABLED */

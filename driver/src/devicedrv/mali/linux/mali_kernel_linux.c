@@ -29,6 +29,9 @@
 #include "mali_platform.h"
 #include "mali_kernel_license.h"
 #include "mali_dma_buf.h"
+#if MALI_INTERNAL_TIMELINE_PROFILING_ENABLED
+#include "mali_profiling_internal.h"
+#endif
 
 /* Streamline support for the Mali driver */
 #if defined(CONFIG_TRACEPOINTS) && MALI_TIMELINE_PROFILING_ENABLED
@@ -126,6 +129,15 @@ int mali_driver_init(void)
 	ret = map_errcode(mali_initialize_subsystems());
 	if (0 != ret) goto initialize_subsystems_failed;
 
+#if MALI_INTERNAL_TIMELINE_PROFILING_ENABLED
+        ret = _mali_internal_profiling_init(mali_boot_profiling ? MALI_TRUE : MALI_FALSE);
+        if (0 != ret)
+        {
+                /* No biggie if we wheren't able to initialize the profiling */
+                MALI_PRINT_ERROR(("Failed to initialize profiling, feature will be unavailable\n"));
+        }
+#endif
+
 	ret = initialize_sysfs();
 	if (0 != ret) goto initialize_sysfs_failed;
 
@@ -135,6 +147,9 @@ int mali_driver_init(void)
 
 	/* Error handling */
 initialize_sysfs_failed:
+#if MALI_INTERNAL_TIMELINE_PROFILING_ENABLED
+        _mali_internal_profiling_term();
+#endif
 	mali_terminate_subsystems();
 initialize_subsystems_failed:
 	mali_osk_low_level_mem_term();
@@ -153,6 +168,10 @@ void mali_driver_exit(void)
 	MALI_DEBUG_PRINT(2, ("Unloading Mali v%d device driver.\n",_MALI_API_VERSION));
 
 	/* No need to terminate sysfs, this will be done automatically along with device termination */
+
+#if MALI_INTERNAL_TIMELINE_PROFILING_ENABLED
+        _mali_internal_profiling_term();
+#endif
 
 	mali_terminate_subsystems();
 

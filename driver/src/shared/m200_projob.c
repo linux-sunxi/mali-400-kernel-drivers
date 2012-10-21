@@ -114,7 +114,7 @@ MALI_STATIC mali_err_code allocate_and_setup_pp_job(struct mali_projob* projob, 
 	}
 
 	/* allocate new tilelist buffer. This is allocated on the fbuilder framepool. 
-	 * Need space for PROJOB_DRAWCALL_LIMIT * 2 commands à 8 bytes each, plus initialization
+	 * Need space for PROJOB_DRAWCALL_LIMIT * 2 commands ï¿½ 8 bytes each, plus initialization
 	 * commands and an end command */
 	num_tilebuf_commands = PROJOB_DRAWCALL_LIMIT*2 + 2; /*+2 for "begin tile" and "end list" */
 	tilebuf = _mali_mem_pool_alloc(pool,
@@ -252,7 +252,7 @@ u32 _mali_projob_add_gp_drawcall(struct mali_frame_builder* frame_builder, u64* 
 	u32 *streams;
 	mali_addr streams_mem;
 	u32 num_cmnds = 0;
-	int num_instructions, i;
+	int num_instructions;
 	
 	/* We want to set up a set of input and output streams for the pilot job, but pilot jobs doesn't use GP inputs nor outputs. 
 	 * So all streams should be disabled. Unfortunately, the HW cannot encode "0 active streams", so we need at least one
@@ -298,7 +298,12 @@ u32 _mali_projob_add_gp_drawcall(struct mali_frame_builder* frame_builder, u64* 
 
 	
 	/* shade vertices : operation mode, number_of_verts = 1 */
+#ifdef USING_MALI450
+	/* mali 450 have two GP cores, and thus need to run the pilot job on both cores to update both constant registers */
+	cmnds[num_cmnds++] = GP_VS_COMMAND_SHADE_VERTICES( GP_PLBU_OPMODE_DRAW_ELEMENTS, 2 );
+#else 
 	cmnds[num_cmnds++] = GP_VS_COMMAND_SHADE_VERTICES( GP_PLBU_OPMODE_DRAW_ELEMENTS, 1 );
+#endif
 	cmnds[num_cmnds++] = GP_VS_COMMAND_FLUSH_WRITEBACK_BUF();
 
 	return num_cmnds;
@@ -367,9 +372,6 @@ void _mali_projob_reset(mali_internal_frame* frame)
 	MALI_DEBUG_ASSERT_POINTER(&frame->projob);
 
 	projob = &frame->projob;
-
-	/* early out? */
-	if(0 == projob->num_pp_drawcalls_added_to_the_current_pp_job) return;
 
 	/* problem: like with flushing, freeing a HW job can cause
 	 * a series of callbacks that call reset. Effectively we end up

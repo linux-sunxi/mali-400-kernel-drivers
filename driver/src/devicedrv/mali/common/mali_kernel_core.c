@@ -35,6 +35,10 @@
 #if MALI_TIMELINE_PROFILING_ENABLED
 #include "mali_osk_profiling.h"
 #endif
+#if MALI_INTERNAL_TIMELINE_PROFILING_ENABLED
+#include "mali_profiling_internal.h"
+#endif
+
 
 /** Pointer to table of resource definitions available to the Mali driver.
  *  _mali_osk_resources_init() sets up the pointer to this table.

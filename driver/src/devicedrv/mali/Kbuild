@@ -55,18 +55,11 @@ endif
 
 
 ifeq ($(USING_PROFILING),1)
-ifeq ($(USING_INTERNAL_PROFILING),0)
 ifndef CONFIG_TRACEPOINTS
 # Should default to gator profiling, but we dont have the kernel feature required, so disable profiling
 override USING_PROFILING = 0
 $(warning "CONFIG_TRACEPOINTS required for USING_PROFILING")
 endif
-endif
-endif
-
-ifeq ($(USING_PROFILING),0)
-# make sure user hasnt selected incompatible flags
-override USING_INTERNAL_PROFILING = 0
 endif
 
 MALI_RELEASE_NAME=$(shell cat $(DRIVER_DIR)/.version 2> /dev/null)
@@ -219,21 +212,17 @@ SRC = \
 	__malidrv_build_info.c
 
 # Selecting files to compile by parsing the config file
+ifeq ($(USING_PROFILING),1)
+SRC += \
+    linux/mali_osk_profiling.c
 
 ifeq ($(USING_INTERNAL_PROFILING),1)
-PROFILING_BACKEND_SOURCES = \
-    linux/mali_osk_profiling_internal.c \
+SRC += \
+    linux/mali_profiling_internal.c \
     timestamp-$(TIMESTAMP)/mali_timestamp.c
 ccflags-y += -I$(DRIVER_DIR)/timestamp-$(TIMESTAMP)
-else
-ifeq ($(USING_PROFILING),1)
-PROFILING_BACKEND_SOURCES = \
-    linux/mali_osk_profiling_gator.c
 endif
 endif
-
-# Add the profiling sources
-SRC += $(PROFILING_BACKEND_SOURCES)
 
 ifeq ($(USING_MALI_PMM_TESTSUITE),1)
 ccflags-y += -I$(DRIVER_DIR)/platform/mali_pmu_testing
