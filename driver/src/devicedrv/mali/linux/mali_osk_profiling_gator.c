@@ -126,7 +126,7 @@ _mali_osk_errcode_t _mali_ukk_sw_counters_report(_mali_uk_sw_counters_report_s *
 int _mali_profiling_set_event(u32 counter_id, s32 event_id)
 {
 
-	if (counter_id == COUNTER_VP_C0)
+	if (COUNTER_VP_C0 == counter_id)
 	{
 		struct mali_gp_core* gp_core = mali_gp_get_global_gp_core();
 		if (NULL != gp_core)
@@ -137,7 +137,7 @@ int _mali_profiling_set_event(u32 counter_id, s32 event_id)
 			}
 		}
 	}
-	else if (counter_id == COUNTER_VP_C1)
+	if (COUNTER_VP_C1 == counter_id)
 	{
 		struct mali_gp_core* gp_core = mali_gp_get_global_gp_core();
 		if (NULL != gp_core)
@@ -148,7 +148,7 @@ int _mali_profiling_set_event(u32 counter_id, s32 event_id)
 			}
 		}
 	}
-	else if (counter_id >= COUNTER_FP0_C0 && counter_id <= COUNTER_FP3_C1)
+	if (COUNTER_FP0_C0 <= counter_id && COUNTER_FP3_C1 >= counter_id)
 	{
 		u32 core_id = (counter_id - COUNTER_FP0_C0) >> 1;
 		struct mali_pp_core* pp_core = mali_pp_get_global_pp_core(core_id);
@@ -171,7 +171,7 @@ int _mali_profiling_set_event(u32 counter_id, s32 event_id)
 			}
 		}
 	}
-	else if (counter_id >= COUNTER_L2_C0 && counter_id <= COUNTER_L2_C1)
+	if (COUNTER_L2_C0 <= counter_id && COUNTER_L2_C1 >= counter_id)
 	{
 		u32 core_id = (counter_id - COUNTER_L2_C0) >> 1;
 		struct mali_l2_cache_core* l2_cache_core = mali_l2_cache_core_get_glob_l2_core(core_id);

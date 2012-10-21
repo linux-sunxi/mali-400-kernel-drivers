@@ -11,10 +11,8 @@
 #ifndef MIDDLE_PROACTIVE_CALCULATIONS
 #define MIDDLE_PROACTIVE_CALCULATIONS
 
-#include "common/essl_target.h"
-#include "common/translation_unit.h"
-#include "common/essl_mem.h"
+#include "common/lir_pass_run_manager.h"
 
-memerr _essl_optimise_constant_input_calculations(mempool *pool, typestorage_context *typestor_ctx, translation_unit* tu);
+memerr _essl_optimise_constant_input_calculations(pass_run_context *pr_ctx, translation_unit* tu);
 
 #endif 

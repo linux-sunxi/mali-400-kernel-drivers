@@ -11,10 +11,9 @@
 #define MIDDLE_REWRITE_IMAGE_SAMPLER_ACCESSES_H
 
 
-#include "common/essl_mem.h"
-#include "common/essl_target.h"
-#include "common/basic_block.h"
-memerr _essl_rewrite_sampler_accesses(mempool *pool, typestorage_context *ts_ctx, control_flow_graph *cfg);
+#include "common/lir_pass_run_manager.h"
+
+memerr _essl_rewrite_sampler_accesses(pass_run_context *pr_ctx, symbol *func);
 
 #endif /* MIDDLE_REWRITE_IMAGE_SAMPLER_ACCESSES_H */
 

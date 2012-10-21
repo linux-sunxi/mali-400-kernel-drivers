@@ -38,6 +38,7 @@ struct mali_pp_slot
 	 * so we don't need to take the group lock so often (and also avoid clutter with the working lock)
 	 */
 	enum mali_pp_slot_state state;
+	struct mali_session_data *session;
 };
 
 static u32 pp_version = 0;
@@ -91,6 +92,7 @@ _mali_osk_errcode_t mali_pp_scheduler_initialize(void)
 				}
 				slots[num_slots].group = group;
 				slots[num_slots].state = MALI_PP_SLOT_STATE_IDLE;
+				slots[num_slots].session = NULL;
 				num_slots++;
 				num_slots_idle++;
 			}
@@ -137,6 +139,31 @@ MALI_STATIC_INLINE void mali_pp_scheduler_assert_locked(void)
 #else
 #define MALI_ASSERT_PP_SCHEDULER_LOCKED()
 #endif
+
+static mali_bool mali_pp_scheduler_session_has_running_jobs(struct mali_session_data *session)
+{
+	u32 i;
+
+	MALI_ASSERT_PP_SCHEDULER_LOCKED();
+
+	if (num_slots_idle == num_slots)
+	{
+		return MALI_FALSE;
+	}
+
+	for (i = 0; i < num_slots; i++)
+	{
+		if (MALI_PP_SLOT_STATE_WORKING == slots[i].state)
+		{
+			if (slots[i].session == session)
+			{
+				return MALI_TRUE;
+			}
+		}
+	}
+
+	return MALI_FALSE;
+}
 
 static void mali_pp_scheduler_schedule(void)
 {
@@ -199,6 +226,20 @@ static void mali_pp_scheduler_schedule(void)
 		job = _MALI_OSK_LIST_ENTRY(job_queue.next, struct mali_pp_job, list);
 		MALI_DEBUG_ASSERT(mali_pp_job_has_unstarted_sub_jobs(job)); /* All jobs on the job_queue should have unstarted sub jobs */
 
+		if (MALI_TRUE == mali_pp_job_has_active_barrier(job))
+		{
+			if (MALI_TRUE == mali_pp_scheduler_session_has_running_jobs(mali_pp_job_get_session(job)))
+			{
+				/* There is already a running job from this session, so we need to enforce the barrier */
+				return;
+			}
+			else
+			{
+				/* Barrier is now enforced, update job object so we don't delay execution of sub-jobs */
+				mali_pp_job_barrier_enforced(job);
+			}
+		}
+
 		#if MALI_PP_SCHEDULER_KEEP_SUB_JOB_STARTS_ALIGNED
 		if ( (0==job->sub_jobs_started) && (num_slots_idle < num_slots) && (job->sub_job_count > num_slots_idle))
 		{
@@ -227,6 +268,7 @@ static void mali_pp_scheduler_schedule(void)
 
 			/* Mark slot as busy */
 			slots[i].state = MALI_PP_SLOT_STATE_WORKING;
+			slots[i].session =  mali_pp_job_get_session(job);
 			num_slots_idle--;
 
 			if (!mali_pp_job_has_unstarted_sub_jobs(job))
@@ -253,36 +295,39 @@ static void mali_pp_scheduler_schedule(void)
 
 static void mali_pp_scheduler_return_job_to_user(struct mali_pp_job *job)
 {
-	_mali_osk_notification_t *notobj = _mali_osk_notification_create(_MALI_NOTIFICATION_PP_FINISHED, sizeof(_mali_uk_pp_job_finished_s));
-	if (NULL != notobj)
+	if (MALI_FALSE == mali_pp_job_use_no_notification(job))
 	{
-		u32 i;
-		u32 sub_jobs = mali_pp_job_get_sub_job_count(job);
-		mali_bool success = mali_pp_job_was_success(job);
-
-		_mali_uk_pp_job_finished_s *jobres = notobj->result_buffer;
-		_mali_osk_memset(jobres, 0, sizeof(_mali_uk_pp_job_finished_s)); /* @@@@ can be removed once we initialize all members in this struct */
-		jobres->user_job_ptr = mali_pp_job_get_user_id(job);
-		if (MALI_TRUE == success)
+		_mali_osk_notification_t *notobj = _mali_osk_notification_create(_MALI_NOTIFICATION_PP_FINISHED, sizeof(_mali_uk_pp_job_finished_s));
+		if (NULL != notobj)
 		{
-			jobres->status = _MALI_UK_JOB_STATUS_END_SUCCESS;
+			u32 i;
+			u32 sub_jobs = mali_pp_job_get_sub_job_count(job);
+			mali_bool success = mali_pp_job_was_success(job);
+
+			_mali_uk_pp_job_finished_s *jobres = notobj->result_buffer;
+			_mali_osk_memset(jobres, 0, sizeof(_mali_uk_pp_job_finished_s)); /* @@@@ can be removed once we initialize all members in this struct */
+			jobres->user_job_ptr = mali_pp_job_get_user_id(job);
+			if (MALI_TRUE == success)
+			{
+				jobres->status = _MALI_UK_JOB_STATUS_END_SUCCESS;
+			}
+			else
+			{
+				jobres->status = _MALI_UK_JOB_STATUS_END_UNKNOWN_ERR;
+			}
+
+			for (i = 0; i < sub_jobs; i++)
+			{
+				jobres->perf_counter0[i] = mali_pp_job_get_perf_counter_value0(job, i);
+				jobres->perf_counter1[i] = mali_pp_job_get_perf_counter_value1(job, i);
+			}
+
+			mali_session_send_notification(mali_pp_job_get_session(job), notobj);
 		}
 		else
 		{
-			jobres->status = _MALI_UK_JOB_STATUS_END_UNKNOWN_ERR;
+			MALI_PRINT_ERROR(("Mali PP scheduler: Unable to allocate notification object\n"));
 		}
-
-		for (i = 0; i < sub_jobs; i++)
-		{
-			jobres->perf_counter0[i] = mali_pp_job_get_perf_counter_value0(job, i);
-			jobres->perf_counter1[i] = mali_pp_job_get_perf_counter_value1(job, i);
-		}
-
-		mali_session_send_notification(mali_pp_job_get_session(job), notobj);
-	}
-	else
-	{
-		MALI_PRINT_ERROR(("Mali PP scheduler: Unable to allocate notification object\n"));
 	}
 
 	mali_pp_job_delete(job);
@@ -313,6 +358,7 @@ void mali_pp_scheduler_job_done(struct mali_group *group, struct mali_pp_job *jo
 		{
 			MALI_DEBUG_ASSERT(MALI_PP_SLOT_STATE_WORKING == slots[i].state);
 			slots[i].state = MALI_PP_SLOT_STATE_IDLE;
+			slots[i].session = NULL;
 			num_slots_idle++;
 			mali_pp_job_mark_sub_job_completed(job, success);
 		}
@@ -396,6 +442,12 @@ _mali_osk_errcode_t _mali_ukk_pp_start_job(_mali_uk_pp_start_job_s *args)
 		mali_pp_scheduler_return_job_to_user(job); /* This will also delete the job object */
 		return _MALI_OSK_ERR_OK; /* User is notified via a notification, so this call is ok */
 	}
+
+#if PROFILING_SKIP_PP_JOBS || PROFILING_SKIP_PP_AND_GP_JOBS
+#warning PP jobs will not be executed
+	mali_pp_scheduler_return_job_to_user(job);
+	return _MALI_OSK_ERR_OK;
+#endif
 
 	mali_pp_scheduler_lock();
 

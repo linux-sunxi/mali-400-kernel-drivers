@@ -95,7 +95,7 @@ static u32 os_allocator_stat(mali_physical_memory_allocator * allocator)
 static void os_allocator_destroy(mali_physical_memory_allocator * allocator)
 {
 	os_allocator * info;
-	MALI_DEBUG_ASSERT_POINTER(allocator);
+        MALI_DEBUG_ASSERT_POINTER(allocator);
 	MALI_DEBUG_ASSERT_POINTER(allocator->ctx);
 	info = (os_allocator*)allocator->ctx;
 	_mali_osk_lock_term(info->mutex);

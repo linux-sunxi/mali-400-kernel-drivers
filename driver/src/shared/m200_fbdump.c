@@ -11,7 +11,6 @@
 #include <mali_system.h>
 #include <shared/m200_gp_frame_builder.h>
 #include <shared/m200_gp_frame_builder_inlines.h>
-#include <shared/m200_incremental_rendering.h>
 #include <shared/mali_surface.h>
 #include <shared/m200_fbdump.h>
 
@@ -205,7 +204,7 @@ MALI_EXPORT mali_bool _mali_fbdump_is_requested(mali_frame_builder* fbuilder)
 	 * Keep the number of the frame that is being built in order to
 	 * dump the frame at a particular rate.
 	 */
-	static u32 frame_number = 0;
+	static u32 frame_number = 1;
 	u32 fbdump_rate;
 
 #if MALI_TIMELINE_PROFILING_ENABLED
@@ -215,18 +214,10 @@ MALI_EXPORT mali_bool _mali_fbdump_is_requested(mali_frame_builder* fbuilder)
 	 */
 	const u8 type = (fbuilder->identifier >> 24) & 0xFF;
 
-#if defined(HAVE_ANDROID_OS)
-	if (MALI_FRAME_BUILDER_TYPE_EGL_COMPOSITOR != type)
+	if (!( MALI_FRAME_BUILDER_TYPE_EGL_COMPOSITOR == type || MALI_FRAME_BUILDER_TYPE_EGL_WINDOW == type))
 	{
 		return MALI_FALSE;
 	}
-#else
-	if (MALI_FRAME_BUILDER_TYPE_EGL_WINDOW != type)
-	{
-		return MALI_FALSE;
-	}
-#endif
-
 #else
 #error "MALI_TIMELINE_PROFILING_ENABLED must be enabled to use MALI_FRAMEBUFFER_DUMP_ENABLED."
 #endif /* MALI_TIMELINE_PROFILING_ENABLED */
@@ -245,7 +236,7 @@ MALI_EXPORT mali_bool _mali_fbdump_is_requested(mali_frame_builder* fbuilder)
 	}
 
 	/* Start counting for the next frame. */
-	frame_number = 0;
+	frame_number = 1;
 	return MALI_TRUE;
 }
 

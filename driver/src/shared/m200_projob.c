@@ -16,6 +16,9 @@
 #include <shared/m200_projob.h>
 #include "m200_regs.h"
 
+#include <regs/MALIGP2/mali_gp_vs_config.h>
+
+
 #define PROJOB_DRAWCALL_WIDTH  16
 #define PROJOB_DRAWCALL_HEIGHT 16
 #define PROJOB_DRAWCALL_LIMIT (PROJOB_DRAWCALL_WIDTH*PROJOB_DRAWCALL_HEIGHT)
@@ -93,7 +96,7 @@ MALI_STATIC mali_err_code allocate_and_setup_pp_job(struct mali_projob* projob, 
 	 * We allocate this now to avoid memfail issues on flush! */
 	new_job = _mali_pp_job_new(frame_builder->base_ctx, 1); /* split count 1 */ 
 	if(new_job == NULL) return MALI_ERR_OUT_OF_MEMORY;
-	
+
 	/* we need to set up all registers for this job. The WBx registers and the 
 	 * tilelist pointers in particular. Both memory blocks must be allocated right here */
 
@@ -156,11 +159,9 @@ MALI_STATIC mali_err_code allocate_and_setup_pp_job(struct mali_projob* projob, 
 	MALI_PL_CMD_BEGIN_NEW_TILE( tilebuf[0], 0, 0 );
 	MALI_PL_CMD_END_OF_LIST(tilebuf[1]);
 
-	/* and set up the new job to trigger the sync handle when done */
-	_mali_pp_job_add_to_sync_handle(projob->sync_handle, new_job);
-
 	return MALI_ERR_NO_ERROR;
 }
+
 
 mali_addr _mali_projob_add_pp_drawcall(struct mali_frame_builder* frame_builder, mali_addr rsw_address)
 {
@@ -184,20 +185,14 @@ mali_addr _mali_projob_add_pp_drawcall(struct mali_frame_builder* frame_builder,
 
 	MALI_DEBUG_ASSERT(frame->state == FRAME_DIRTY, ("Current frame must be in the DIRTY state"));
 
-	if(projob->sync_handle == NULL) 
-	{
-		/* create a new sync handle at the first projob drawcall in a frame 
-		 * This sync handle persists until flush() or reset() is called */
-		projob->sync_handle = _mali_sync_handle_new(frame_builder->base_ctx);
-		if(projob->sync_handle == NULL) return 0;
-	}
-
 	pool = _mali_frame_builder_frame_pool_get( frame_builder);
 
 	/* If there is no current job or no more space in the current job, 
 	 * reallocate room for a new HW job, and a new HW job */
 	if(projob->num_pp_drawcalls_added_to_the_current_pp_job >= PROJOB_DRAWCALL_LIMIT ||
-	   projob->projob_pp_job_array == NULL ) /* no current job */
+	   projob->projob_pp_job_array == NULL ||
+       projob->projob_pp_job_array_size == 0 ||
+       projob->projob_pp_job_array[projob->projob_pp_job_array_size -1] == NULL) /* no current job */
 	{
 		mali_err_code err = allocate_and_setup_pp_job(projob, pool, frame_builder, frame);
 		if(err != MALI_ERR_NO_ERROR) return 0;
@@ -249,13 +244,65 @@ mali_addr _mali_projob_add_pp_drawcall(struct mali_frame_builder* frame_builder,
 	return out_addr;
 }
 
-/** see comment below inside _flush() **/
-MALI_STATIC void projob_cb_wrapper(mali_base_ctx_handle ctx, void * cb_param)
+
+u32 _mali_projob_add_gp_drawcall(struct mali_frame_builder* frame_builder, u64* cmnds, struct bs_shaderpass* projob_shader)
 {
-	struct mali_projob* projob = cb_param;
-	MALI_DEBUG_ASSERT_POINTER(projob);
-	MALI_IGNORE(ctx);
-	projob->cb_func(projob->cb_param); /* call the real callback */
+
+	mali_mem_pool* pool;
+	u32 *streams;
+	mali_addr streams_mem;
+	u32 num_cmnds = 0;
+	int num_instructions, i;
+	
+	/* We want to set up a set of input and output streams for the pilot job, but pilot jobs doesn't use GP inputs nor outputs. 
+	 * So all streams should be disabled. Unfortunately, the HW cannot encode "0 active streams", so we need at least one
+	 * active stream created in both input and output. This stream must be of type GP_VS_VSTREAM_FORMAT_NO_DATA.
+	 *
+	 * We can then re-use that stream table for both input and output streams. 
+	 *
+	 */
+	const int stream_setup_mem_size = 8; /* 1 stream * 64 bits per stream (32bit pointer, 32bit specifier). We will reuse this for both input and output. */
+
+	MALI_DEBUG_ASSERT_POINTER(frame_builder);
+	MALI_DEBUG_ASSERT_POINTER( projob_shader );
+
+	pool = _mali_frame_builder_frame_pool_get( frame_builder);
+
+	/* need a buffer for dummy  streams */
+	streams = _mali_mem_pool_alloc(pool, stream_setup_mem_size, &streams_mem);
+	if (NULL == streams) return 0;
+
+	streams[ GP_VS_CONF_REG_INP_ADDR( 0 ) ] = _SWAP_ENDIAN_U32_U32(streams_mem); /* points to itself. No data will be read, but the pointer must be legal */
+	streams[ GP_VS_CONF_REG_INP_SPEC( 0 ) ] = _SWAP_ENDIAN_U32_U32(GP_VS_VSTREAM_FORMAT_NO_DATA);
+
+	/* put all the projob passes into the VS CMD list */
+
+	/* dummy streams, put the same memory for input/output, we don't care about this memory assignment*/
+	cmnds[num_cmnds++] = GP_VS_COMMAND_WRITE_INPUT_OUTPUT_CONF_REGS(streams_mem, 0, 1);  /* setup 1 input stream */
+	cmnds[num_cmnds++] = GP_VS_COMMAND_WRITE_INPUT_OUTPUT_CONF_REGS(streams_mem, 1, 1);  /* setup 1 output stream */
+
+	num_instructions = projob_shader->flags.vertex.instruction_end;
+
+	/* set vertex program parameters */
+	cmnds[num_cmnds++] = GP_VS_COMMAND_LOAD_SHADER(
+				_mali_mem_mali_addr_get(projob_shader->shader_binary_mem->mali_memory, 0), /* shader address */
+				0,                                                                         /* destination instruction */
+				num_instructions                                                           /* length */
+				);
+
+	cmnds[num_cmnds++] = GP_VS_COMMAND_WRITE_CONF_REG( GP_VS_CONF_REG_PROG_PARAM_CREATE(projob_shader->flags.vertex.instruction_start, 
+	                                                                                    projob_shader->flags.vertex.instruction_end - 1, 
+	                                                                                    projob_shader->flags.vertex.instruction_last_touching_input - 1), 
+	                                                                                    GP_VS_CONF_REG_PROG_PARAM);
+	cmnds[num_cmnds++] = GP_VS_COMMAND_WRITE_CONF_REG( GP_VS_CONF_REG_OPMOD_CREATE(1, 1), GP_VS_CONF_REG_OPMOD ); /* 1 input, 1 output */
+
+	
+	/* shade vertices : operation mode, number_of_verts = 1 */
+	cmnds[num_cmnds++] = GP_VS_COMMAND_SHADE_VERTICES( GP_PLBU_OPMODE_DRAW_ELEMENTS, 1 );
+	cmnds[num_cmnds++] = GP_VS_COMMAND_FLUSH_WRITEBACK_BUF();
+
+	return num_cmnds;
+
 }
 
 /**************** PUBLIC FUNCTIONS **********************/
@@ -264,8 +311,6 @@ void _mali_projob_pp_flush(mali_internal_frame* frame)
 {
 	u32 i;
 	struct mali_projob* projob;
-	
-	mali_sync_handle sync_handle;
 	mali_pp_job_handle* pp_job_array;
     u32 pp_job_array_size;
 
@@ -275,7 +320,7 @@ void _mali_projob_pp_flush(mali_internal_frame* frame)
 	projob = &frame->projob;
 
 	/* early out? */
-	if(!projob->sync_handle) return;
+	if(0 == projob->num_pp_drawcalls_added_to_the_current_pp_job) return;
 
 	/* problem: starting a HW job can cause it to finish instantly. 
 	 * Finishing a job can cause it to be cleaned up, doing callbacks. 
@@ -291,12 +336,8 @@ void _mali_projob_pp_flush(mali_internal_frame* frame)
 	 */
 	pp_job_array = projob->projob_pp_job_array;
 	projob->projob_pp_job_array = NULL;
-	sync_handle = projob->sync_handle;
-	projob->sync_handle = MALI_NO_HANDLE;
 	pp_job_array_size = projob->projob_pp_job_array_size;
 	projob->projob_pp_job_array_size = 0;
-	
-	MALI_DEBUG_ASSERT_POINTER(sync_handle);
 
 	/* now that the struct is clean, call all the local PP jobs, 
 	 * then clean up the stack variables we just set up. */
@@ -305,28 +346,10 @@ void _mali_projob_pp_flush(mali_internal_frame* frame)
 	{
 		MALI_DEBUG_ASSERT_POINTER(pp_job_array);
 		MALI_DEBUG_ASSERT_POINTER(pp_job_array[i]);
-		/* all the jobs have already been set up with the sync handle, 
-		 * just flush them at will. When done, they will decrement the 
-		 * sync handle inside the projob as they finish
-		 */
 		_mali_pp_job_start(pp_job_array[i], MALI_JOB_PRI_NORMAL);
 	}
 
-	/* Set up the callback function on the sync handle 
-	 * Our cb_func is a mali_frame_cb_func, but the 
-	 * synic handle require a mali_sync_cb_func. The difference
-	 * is that the latter has one extra useless parameter. 
-	 * Using a wrapper to kill that off! */
-	_mali_sync_handle_cb_function_set(sync_handle, projob_cb_wrapper, projob);
-
-	/* Since we do have a sync handle, flush it. This need to happen after starting all
-	 * the projobs. At this point, adding more drawcalls to the sync handle is illegal. 
-	 * The pointer is invalid, and will be cleaned up by base
-	 * I'll just leave the pointer here on the stack, we already cleaned it up in the
-	 * projob struct. */
-	_mali_sync_handle_flush(sync_handle);
-
-	/* since there is a sync handle, there is also at least one job using it.
+	/* since there is draw calls added, there is also at least one job using it.
 	 * Though it is possible that we failed to allocate it. So add an if here 
 	 * for safety. */
 	if(pp_job_array) _mali_sys_free(pp_job_array);
@@ -337,8 +360,6 @@ void _mali_projob_reset(mali_internal_frame* frame)
 {
 	u32 i;
 	struct mali_projob* projob;
-
-	mali_sync_handle sync_handle;
 	mali_pp_job_handle* pp_job_array;
     u32 pp_job_array_size;
 	
@@ -348,7 +369,7 @@ void _mali_projob_reset(mali_internal_frame* frame)
 	projob = &frame->projob;
 
 	/* early out? */
-	if(!projob->sync_handle) return;
+	if(0 == projob->num_pp_drawcalls_added_to_the_current_pp_job) return;
 
 	/* problem: like with flushing, freeing a HW job can cause
 	 * a series of callbacks that call reset. Effectively we end up
@@ -360,13 +381,9 @@ void _mali_projob_reset(mali_internal_frame* frame)
 	 */
 	pp_job_array = projob->projob_pp_job_array;
 	projob->projob_pp_job_array = NULL;
-	sync_handle = projob->sync_handle;
-	projob->sync_handle = MALI_NO_HANDLE;
 	pp_job_array_size = projob->projob_pp_job_array_size;
 	projob->projob_pp_job_array_size = 0;
 	
-	MALI_DEBUG_ASSERT_POINTER(sync_handle);
-
 	for( i = 0; i < pp_job_array_size; i++)
 	{
 		MALI_DEBUG_ASSERT_POINTER(pp_job_array);
@@ -374,11 +391,7 @@ void _mali_projob_reset(mali_internal_frame* frame)
 		_mali_pp_job_free(pp_job_array[i]);
 	}
 
-	/* there is no sync handle free call. To get rid of a sync handle, 
-	 * flush it and ensure it isn't doing any callbacks */
-	_mali_sync_handle_flush(sync_handle);
-
-	/* since there is a sync handle, there is also at least one job using it.
+	/* since there is draw calls added, there is also at least one job using it.
 	 * Though it is possible that we failed to allocate it. So add an if here 
 	 * for safety. */
 	if(pp_job_array) _mali_sys_free(pp_job_array);
@@ -393,20 +406,5 @@ mali_bool _mali_projob_have_drawcalls(struct mali_internal_frame* frame)
 	MALI_DEBUG_ASSERT_POINTER(&frame->projob);
 	projob = &frame->projob;
 
-	/* if there is a sync handle, then someone added a drawcall */
-	return projob->sync_handle != NULL;
+	return (0 < projob->num_pp_drawcalls_added_to_the_current_pp_job);
 }
-
-void _mali_projob_set_flush_callback(struct mali_internal_frame* frame, mali_frame_cb_func cb_func, mali_frame_cb_param cb_param)
-{
-	struct mali_projob* projob;
-	MALI_DEBUG_ASSERT_POINTER(frame);
-	MALI_DEBUG_ASSERT_POINTER(&frame->projob);
-	projob = &frame->projob;
-
-	projob->cb_func = cb_func;
-	projob->cb_param = cb_param;
-
-}
-
-

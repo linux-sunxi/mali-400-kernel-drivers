@@ -21,10 +21,10 @@
 #include "middle/dominator.h"
 
 /**
- * This file includes implementation of the proactive shading optimization.
+ * This file includes implementation of the pilot shading optimization.
  * The compiler identifies chains of operations dependent only on run-time constants (e.g. uniform varibales)
- * and moves them to a separate proactive shader (up to 4). 
- * Afterwards driver executes these proactive shaders before main jobs
+ * and moves them to a separate pilot shader (up to 4). 
+ * Afterwards driver executes these pilot shaders before main jobs
  */
 
 /* rt stands for run-time */
@@ -43,7 +43,7 @@ ASSUME_ALIASING(run_time_nodes_list, generic_list);
 typedef struct run_time_constant_node 
 {
 	struct run_time_constant_node *next;	/* Next element in the list */
-	node *node;								/* an rt constant node to be moved to a proactive shader (with all necessary predecessors)*/
+	node *node;								/* an rt constant node to be moved to a pilot shader (with all necessary predecessors)*/
 	node *orig_rt_node;						/* an originally found rt constant node */
 	run_time_nodes_list *prev_rt_nodes;		/* list of rt nodes */
 	basic_block *orig_rt_bb;				/* basic block where original rt node is located */
@@ -55,42 +55,46 @@ ASSUME_ALIASING(run_time_constant_node, generic_list);
 /**
  * Optimization context
  */
-typedef struct proactive_calculations_context
+typedef struct pilot_calculations_context
 {
 	mempool *pool;
-	mempool temp_pool;
+	mempool *temp_pool;
 	target_descriptor *desc;
 	translation_unit *tu;
 	typestorage_context *ts_ctx;
 	control_flow_graph *cfg;
 	symbol *func;
 	ptrdict node_succs;					/* dictionry of nodes' successors */
-	ptrset rt_const_nodes;
+	ptrdict rt_const_nodes;
 	ptrset visited;
-	ptrset hoist_points;				/* nodes to move to a proactive shader */
-	ptrdict copied;						/* nodes that have been cloned during a proactive shader creation */
+	ptrset hoist_points;				/* nodes to move to a pilot shader */
+	ptrdict copied;						/* nodes that have been cloned during a pilot shader creation */
 	run_time_constant_node *rtc_nodes;
 	essl_bool applied;					/* flag to set if the optimization was applied */
-}proactive_calculations_context;
+}pilot_calculations_context;
 
 /* A list of node successors */
 typedef struct node_succs_list {
 	struct node_succs_list *next; 	/* Next element in the list */
 	node *succ; 					/* successor */
-	essl_bool const_input;			/* all inputs to this node are rt constants */
 } node_succs_list;
 ASSUME_ALIASING(node_succs_list, generic_list);
 
+static memerr find_last_fully_const_succ(pilot_calculations_context *ctx, node *n, run_time_constant_node *rtc_elem, int *calc_weight_p);
+#define MIN_ALLOWED_WEIGHT 5
 /**
- * weight function for proactive calculations
+ * weight function for pilot calculations
  */
-static int get_node_proactive_weight(node *op)
+static int get_node_pilot_weight(node *op)
 {
 	switch (op->hdr.kind) {
 	case EXPR_KIND_PHI:
 	case EXPR_KIND_DONT_CARE:
 	case EXPR_KIND_TRANSFER:
 	case EXPR_KIND_DEPEND:
+	case EXPR_KIND_VECTOR_COMBINE:
+	case EXPR_KIND_CONSTANT:
+	case EXPR_KIND_VARIABLE_REFERENCE:
 		return 0;
 	case EXPR_KIND_UNARY:
 		switch(op->expr.operation)
@@ -130,19 +134,26 @@ static int get_node_proactive_weight(node *op)
  *
  * @returns ESSL_TRUE if node is run time constant, ESSL_FALSE otherwise
  */
-static essl_bool is_node_inputs_rt_constant(proactive_calculations_context *ctx, node *op, int *weight)
+static essl_bool is_node_inputs_rt_constant(pilot_calculations_context *ctx, node *op, int *weight, int *child_weight_p)
 {
 	unsigned i;
 	essl_bool res = ESSL_TRUE;
+	int child_weight = 0;
 
 	/* get the node weight */
 	if(weight != NULL)
 	{
-		*weight += get_node_proactive_weight(op);
+		*weight += get_node_pilot_weight(op);
 	}
-	
+
+	if(child_weight_p != NULL)
+	{
+		*child_weight_p += get_node_pilot_weight(op);
+	}
+
+
 	/* check if the node has been analyzed */
-	if((_essl_ptrset_has(&ctx->rt_const_nodes, op)) == ESSL_TRUE)
+	if((_essl_ptrdict_has_key(&ctx->rt_const_nodes, op)) == ESSL_TRUE)
 	{
 		return ESSL_TRUE;
 	}
@@ -150,7 +161,7 @@ static essl_bool is_node_inputs_rt_constant(proactive_calculations_context *ctx,
 	/* only uniform loads are conisdered to be run time constant */
 	if(op->hdr.kind == EXPR_KIND_LOAD)
 	{
-		if(op->expr.u.load_store.var_kind == VAR_KIND_UNIFORM)
+		if(op->expr.u.load_store.address_space == ADDRESS_SPACE_UNIFORM)
 		{
 			node *address;
 			/* if addresing expression consists only from a variable reference it's definitely run-time constant */
@@ -189,13 +200,13 @@ static essl_bool is_node_inputs_rt_constant(proactive_calculations_context *ctx,
 	for(i = 0; i < GET_N_CHILDREN(op); i++)
 	{
 		node *child = GET_CHILD(op, i);
-		res &= is_node_inputs_rt_constant(ctx, child, weight);
+		res &= is_node_inputs_rt_constant(ctx, child, weight, &child_weight);
 	}
 	
 	/* hash run time constants */
 	if(res == ESSL_TRUE)
 	{
-		ESSL_CHECK(_essl_ptrset_insert(&ctx->rt_const_nodes, op));
+		ESSL_CHECK(_essl_ptrdict_insert(&ctx->rt_const_nodes, op, (void *)(long)child_weight));
 	}
 	return res;
 }
@@ -209,12 +220,12 @@ static essl_bool is_node_inputs_rt_constant(proactive_calculations_context *ctx,
  *
  * @returns MEM_OK if all allocation were correct
  */
-static memerr add_succs_to_list(proactive_calculations_context *ctx, node *n, node *succ)
+static memerr add_succs_to_list(pilot_calculations_context *ctx, node *n, node *succ)
 {
 	node_succs_list *succs_list;
 	node_succs_list *sl;
 	succs_list = _essl_ptrdict_lookup(&ctx->node_succs, n);
-	ESSL_CHECK(sl = LIST_NEW(&ctx->temp_pool, node_succs_list));
+	ESSL_CHECK(sl = LIST_NEW(ctx->temp_pool, node_succs_list));
 	sl->succ = succ;
 	LIST_INSERT_BACK(&succs_list, sl);
 	ESSL_CHECK(_essl_ptrdict_insert(&ctx->node_succs, n, succs_list));
@@ -230,7 +241,7 @@ static memerr add_succs_to_list(proactive_calculations_context *ctx, node *n, no
  *
  * @returns MEM_OK if all allocation were correct
  */
-static memerr collect_successors_for_node(proactive_calculations_context *ctx, node *n)
+static memerr collect_successors_for_node(pilot_calculations_context *ctx, node *n)
 {
 	unsigned i;
 
@@ -276,7 +287,7 @@ static memerr collect_successors_for_node(proactive_calculations_context *ctx, n
  * @returns MEM_OK if all allocation were correct
  */
 
-static memerr collect_successors(proactive_calculations_context *ctx, basic_block *b)
+static memerr collect_successors(pilot_calculations_context *ctx, basic_block *b)
 {
 	phi_list *phi;
 	control_dependent_operation *c_op;
@@ -307,7 +318,7 @@ static memerr collect_successors(proactive_calculations_context *ctx, basic_bloc
  *
  *	@returns list of successors if at least one of them is not rt constant
  */
-static node_succs_list * find_rt_const_succs(proactive_calculations_context *ctx, node *n, essl_bool *has_succs)
+static node_succs_list * find_rt_const_succs(pilot_calculations_context *ctx, node *n, essl_bool *has_succs)
 {
 	essl_bool all_succs_const = ESSL_TRUE;
 	node_succs_list *succs_list;
@@ -316,7 +327,7 @@ static node_succs_list * find_rt_const_succs(proactive_calculations_context *ctx
 	essl_bool is_const;
 	*has_succs = ESSL_TRUE;
 	succs_list = _essl_ptrdict_lookup(&ctx->node_succs, n);
-	if(succs_list == NULL)
+	if(succs_list == NULL && n->hdr.kind != EXPR_KIND_STORE)
 	{
 		*has_succs = ESSL_FALSE;
 		return NULL;
@@ -325,11 +336,8 @@ static node_succs_list * find_rt_const_succs(proactive_calculations_context *ctx
 	{
 		int weight = 0;
 		succ = sl->succ;
-		is_const = is_node_inputs_rt_constant(ctx, succ, &weight);
-		if(is_const)
-		{
-			sl->const_input = ESSL_TRUE;
-		}else
+		is_const = is_node_inputs_rt_constant(ctx, succ, &weight, NULL);
+		if(!is_const)
 		{
 			all_succs_const = ESSL_FALSE;
 		}
@@ -371,6 +379,60 @@ static essl_bool is_addressing_op(node *n)
 	return ESSL_FALSE;
 }
 
+static memerr add_to_hoist_points(pilot_calculations_context *ctx, 
+						node *n,
+						run_time_constant_node *rtc_elem,
+						node *succ, 
+						int weight,
+						essl_bool is_const, 
+						int *calc_weight,
+						essl_bool *prev_node_set)
+{
+	if(is_const)
+	{
+		int tmp_weight;
+		run_time_nodes_list * prev_rt_node_elem;
+		if(succ == ctx->cfg->exit_block->source)
+		{
+			/* if successor is the source for the exit then we should not remove it */
+			*calc_weight = weight;
+			return MEM_OK;
+		}
+
+
+		ESSL_CHECK(prev_rt_node_elem = LIST_NEW(ctx->temp_pool, run_time_nodes_list));
+		prev_rt_node_elem->node = rtc_elem->node;
+		LIST_INSERT_FRONT(&rtc_elem->prev_rt_nodes, prev_rt_node_elem);
+		rtc_elem->node = succ;
+		(*calc_weight) += weight;
+		if(succ != n)
+		{
+			ESSL_CHECK(find_last_fully_const_succ(ctx, succ, rtc_elem, &tmp_weight));
+			(*calc_weight) += tmp_weight;
+		}
+	}else
+	{
+		/* not constant */
+		if(is_addressing_op(n))
+		{
+			run_time_nodes_list *prev_rt_node_elem;
+			*prev_node_set = ESSL_TRUE;
+			/* addressing operations are tightly connected with their successors and can't moved to another func without a successor */
+			prev_rt_node_elem = rtc_elem->prev_rt_nodes;
+			rtc_elem->node = prev_rt_node_elem->node; /* last added element */
+			prev_rt_node_elem = prev_rt_node_elem->next;
+			while(is_addressing_op(rtc_elem->node) && prev_rt_node_elem!= NULL)
+			{
+				rtc_elem->node = prev_rt_node_elem->node;
+				prev_rt_node_elem = prev_rt_node_elem->next;
+			}
+		}
+	}
+	ESSL_CHECK(_essl_ptrset_insert(&ctx->hoist_points, rtc_elem->node));
+
+	return MEM_OK;
+
+}
 /**
  * For the node find the last (in depth) successor which is rt constant
  *
@@ -380,7 +442,7 @@ static essl_bool is_addressing_op(node *n)
  *
  * @returns weight
  */
-static int find_last_fully_const_succ(proactive_calculations_context *ctx, node *n, run_time_constant_node *rtc_elem)
+static memerr find_last_fully_const_succ(pilot_calculations_context *ctx, node *n, run_time_constant_node *rtc_elem, int *calc_weight_p)
 {
 	int calc_weight = 0;
 	node_succs_list *succs_list;
@@ -390,66 +452,42 @@ static int find_last_fully_const_succ(proactive_calculations_context *ctx, node 
 	essl_bool prev_node_set = ESSL_FALSE;
 	succs_list = _essl_ptrdict_lookup(&ctx->node_succs, n);
 	/* traversing all successors */
-	for(sl = succs_list; sl != NULL; sl = sl->next)
+	if(succs_list == NULL)
 	{
 		int weight = 0;
-		succ = sl->succ;
-		if(succ->hdr.kind == EXPR_KIND_PHI)
+		if(n->hdr.kind == EXPR_KIND_STORE)
 		{
-			if(succ->expr.u.phi.block->postorder_visit_number < rtc_elem->orig_rt_bb->postorder_visit_number)
-			{
-				/* loop structure: don't work with loops as it means that we should modife control flow*/
-				rtc_elem->orig_rt_node = NULL;
-				_essl_ptrset_clear(&ctx->hoist_points);
-				return -1;
-			}
-			is_const = ESSL_FALSE;
-		}else if(succ->hdr.kind == EXPR_KIND_STORE)
-		{
-			is_const = ESSL_FALSE;
-		}else
-		{
-			is_const = is_node_inputs_rt_constant(ctx, succ, &weight);
+			node *pred = GET_CHILD(n, 1);
+			ESSL_CHECK(pred);
+			is_const = is_node_inputs_rt_constant(ctx, pred, &weight, NULL);
+			ESSL_CHECK(add_to_hoist_points(ctx, pred, rtc_elem, pred, weight, is_const, &calc_weight, &prev_node_set));
 		}
-
-		is_const = is_node_inputs_rt_constant(ctx, succ, &weight);
-		if(is_const)
+	}else
+	{
+		for(sl = succs_list; sl != NULL; sl = sl->next)
 		{
-			run_time_nodes_list * prev_rt_node_elem;
-			if(succ == ctx->cfg->exit_block->source)
+			int weight = 0;
+			succ = sl->succ;
+			if(succ->hdr.kind == EXPR_KIND_PHI)
 			{
-				/* if successor is the source for the exit then we should not remove it */
-				return weight;
-			}
-
-			
-			/* successor is rt constant and can be moved to a rpoactive shader */
-			succs_list->const_input = ESSL_TRUE;
-			ESSL_CHECK(prev_rt_node_elem = LIST_NEW(&ctx->temp_pool, run_time_nodes_list));
-			prev_rt_node_elem->node = rtc_elem->node;
-			LIST_INSERT_FRONT(&rtc_elem->prev_rt_nodes, prev_rt_node_elem);
-			rtc_elem->node = succ;
-			calc_weight += weight;
-			calc_weight += find_last_fully_const_succ(ctx, succ, rtc_elem);
-		}else
-		{
-			/* not constant */
-			if(is_addressing_op(n))
-			{
-				run_time_nodes_list *prev_rt_node_elem;
-				prev_node_set = ESSL_TRUE;
-				/* addressing operations are tightly connected with their successors and can't moved to another func without a successor */
-				prev_rt_node_elem = rtc_elem->prev_rt_nodes;
-				rtc_elem->node = prev_rt_node_elem->node; /* last added element */
-				prev_rt_node_elem = prev_rt_node_elem->next;
-				while(is_addressing_op(rtc_elem->node) && prev_rt_node_elem!= NULL)
+				if(succ->expr.u.phi.block->postorder_visit_number < rtc_elem->orig_rt_bb->postorder_visit_number)
 				{
-					rtc_elem->node = prev_rt_node_elem->node;
-					prev_rt_node_elem = prev_rt_node_elem->next;
+					/* loop structure: don't work with loops as it means that we should modife control flow*/
+					rtc_elem->orig_rt_node = NULL;
+					_essl_ptrset_clear(&ctx->hoist_points);
+					return -1;
 				}
+				is_const = ESSL_FALSE;
+			}else if(succ->hdr.kind == EXPR_KIND_STORE)
+			{
+				is_const = ESSL_FALSE;
+			}else
+			{
+				is_const = is_node_inputs_rt_constant(ctx, succ, &weight, NULL);
 			}
+
+			ESSL_CHECK(add_to_hoist_points(ctx, n, rtc_elem, succ, weight, is_const, &calc_weight, &prev_node_set));
 		}
-		ESSL_CHECK(_essl_ptrset_insert(&ctx->hoist_points, rtc_elem->node));
 	}
 
 	/* if there are more than 2 successors to move we'll just drop, 
@@ -473,7 +511,9 @@ static int find_last_fully_const_succ(proactive_calculations_context *ctx, node 
 	}
 	_essl_ptrset_clear(&ctx->hoist_points);
 
-	return calc_weight;
+	*calc_weight_p = calc_weight;
+
+	return MEM_OK;
 }
 
 /**
@@ -481,7 +521,7 @@ static int find_last_fully_const_succ(proactive_calculations_context *ctx, node 
  *
  * @param ctx optimization context
  */
-static void find_last_point_for_hoisting_out(proactive_calculations_context *ctx)
+static memerr find_last_point_for_hoisting_out(pilot_calculations_context *ctx)
 {
 	run_time_constant_node *elem;
 	run_time_constant_node *elem_n;
@@ -493,17 +533,19 @@ static void find_last_point_for_hoisting_out(proactive_calculations_context *ctx
 	for(elem = ctx->rtc_nodes; elem != NULL; elem = elem_n)
 	{
 		/* for each  rt constant candidate*/
+		int tmp_weight;
 		node_succs_list *succs_list;
 		elem_n = elem->next;
-		weight = get_node_proactive_weight(elem->node);
-		weight += find_last_fully_const_succ(ctx, elem->node, elem);
-		elem->weight = weight;
+		weight = get_node_pilot_weight(elem->node);
+		ESSL_CHECK(_essl_ptrdict_clear(&ctx->rt_const_nodes));
+		ESSL_CHECK(find_last_fully_const_succ(ctx, elem->node, elem, &tmp_weight));
+		elem->weight = weight + tmp_weight;
 		succs_list = _essl_ptrdict_lookup(&ctx->node_succs, elem->node);
 		if(succs_list == NULL || elem->orig_rt_node == NULL)
 		{
 			/* either no succs - dead code or
 			 * we found a loop
-			 * anyway it's not suitable to move to a proactive shader
+			 * anyway it's not suitable to move to a pilot shader
 			 */
 			if(prev_elem != NULL)
 			{
@@ -516,6 +558,8 @@ static void find_last_point_for_hoisting_out(proactive_calculations_context *ctx
 		}
 		prev_elem = elem;
 	}
+
+	ctx->rtc_nodes = LIST_SORT(ctx->rtc_nodes, compare_rtc_nodes_by_weight, run_time_constant_node);
 
 	elem = ctx->rtc_nodes;
 	/* it is possible that for different candidates we found 
@@ -537,45 +581,47 @@ static void find_last_point_for_hoisting_out(proactive_calculations_context *ctx
 		elem = elem->next;
 	}
 
+	return MEM_OK;
+
 }
 
 /**
- * Control dependent operations that we moved to a proactive shaders should be removed from structures in the original function
+ * Control dependent operations that we moved to a pilot shaders should be removed from structures in the original function
  *
  * @param ctx optimization context
  * @param orig_func original function
- * @param proactive_func proactive shader
+ * @param pilot_func pilot shader
  * @param n node to analyze
  *
  * @returns MEM_OK if all allocation were correct
  */
-static memerr fix_control_dependent_preds(proactive_calculations_context *ctx, symbol *orig_func, symbol *proactive_func, node *n)
+static memerr fix_control_dependent_preds(pilot_calculations_context *ctx, symbol *orig_func, symbol *pilot_func, node *n)
 {
 	unsigned i;
 
 	if(n->hdr.is_control_dependent)
 	{
 		control_dependent_operation *p;
-		basic_block *bb = proactive_func->control_flow_graph->exit_block;
+		basic_block *bb = pilot_func->control_flow_graph->exit_block;
 		p = _essl_ptrdict_lookup(&orig_func->control_flow_graph->control_dependence, n);
 		if(p == NULL)
 		{
 			/* it's strange that a control dependent operation was used twice */
-			assert(_essl_ptrdict_lookup(&proactive_func->control_flow_graph->control_dependence, n) != NULL);
+			assert(_essl_ptrdict_lookup(&pilot_func->control_flow_graph->control_dependence, n) != NULL);
 			return MEM_OK;
 		}
 		_essl_ptrdict_remove(&orig_func->control_flow_graph->control_dependence, n);
 		_essl_remove_control_dependent_op_node(&p->block->control_dependent_ops, n);
 		p->block = bb;
 		p->next = NULL;
-		ESSL_CHECK(_essl_ptrdict_insert(&proactive_func->control_flow_graph->control_dependence, n, p));
+		ESSL_CHECK(_essl_ptrdict_insert(&pilot_func->control_flow_graph->control_dependence, n, p));
 		LIST_INSERT_FRONT(&bb->control_dependent_ops, p);
 	}
 	for(i = 0; i < GET_N_CHILDREN(n); i++)
 	{
 		node* n_child;
 		ESSL_CHECK(n_child = GET_CHILD(n, i));
-		fix_control_dependent_preds(ctx, orig_func, proactive_func, n_child);
+		fix_control_dependent_preds(ctx, orig_func, pilot_func, n_child);
 	}
 
 	return MEM_OK;
@@ -585,7 +631,7 @@ static memerr fix_control_dependent_preds(proactive_calculations_context *ctx, s
 /**
  * Copy a rt constant node
  */
-static node * copy_rtc_node(proactive_calculations_context *ctx, node *n)
+static node * copy_rtc_node(pilot_calculations_context *ctx, node *n)
 {
 	unsigned i;
 	node *res;
@@ -612,20 +658,19 @@ static node * copy_rtc_node(proactive_calculations_context *ctx, node *n)
 }
 
 /**
- * Move all operations that operate on run time constant input to a proactive shader
+ * Move all operations that operate on run time constant input to a pilot shader
  *
  * @param ctx optimization context
- * @param proactive_func proactive shader function where to move
+ * @param pilot_func pilot shader function where to move
  * @param rt_node run time constant node to move
- * @param num number of the created proactive shader function
+ * @param num number of the created pilot shader function
  *
  * @returns MEM_OK if all allocations were correct
  */
-static memerr move_calculations_to_proactive_shader(proactive_calculations_context *ctx, symbol *proactive_func, run_time_constant_node *rt_node, unsigned num)
+static memerr move_calculations_to_pilot_shader(pilot_calculations_context *ctx, symbol *pilot_func, run_time_constant_node *rt_node, unsigned num)
 {
 	symbol *sym;
 	qualifier_set qual;
-	const type_specifier *vec4;
 	node *load;
 	node *new_input;
 	node *address;
@@ -639,39 +684,75 @@ static memerr move_calculations_to_proactive_shader(proactive_calculations_conte
 	char uni_name[30];
 	string sym_name;
 
-	
-	snprintf(uni_name, 30, "__gl_mali_proactive_uniform_%d", num);
-	sym_name = _essl_cstring_to_string(ctx->pool, uni_name);
 	_essl_init_qualifier_set(&qual);
-	qual.variable = VAR_QUAL_VARYING;
-	qual.precision = PREC_MEDIUM;
+	if(ctx->desc->kind == TARGET_FRAGMENT_SHADER)
+	{
+		const type_specifier *vec4;
+		snprintf(uni_name, 30, "?__gl_mali_pilot_uniform_%d", num);
+		sym_name = _essl_cstring_to_string(ctx->pool, uni_name);
+		ESSL_CHECK(sym_name.ptr);
 
-	/* always 4 elements because in HW these uniforms should have a stride of pow of 2 */
-	ESSL_CHECK(vec4 = _essl_get_type_with_size(ctx->ts_ctx, TYPE_FLOAT, 4, SIZE_FP16));
+		qual.variable = VAR_QUAL_UNIFORM;
+		qual.precision = PREC_MEDIUM;
 
-	/* uniform to substitute hoisted out calculations */
-	ESSL_CHECK(sym = _essl_new_variable_symbol(ctx->pool, sym_name, vec4, qual, VAR_KIND_UNIFORM, UNKNOWN_SOURCE_OFFSET));
-	sym->is_indexed_statically = ESSL_FALSE;
-	sym->proactive_uniform_num = num;
-	ESSL_CHECK(sym_list = LIST_NEW(ctx->pool, symbol_list));
-	sym_list->sym = sym;
-	LIST_INSERT_BACK(ctx->tu->uniforms, sym_list);
+		/* always 4 elements because in HW these uniforms should have a stride of pow of 2 */
+		ESSL_CHECK(vec4 = _essl_get_type_with_size(ctx->ts_ctx, TYPE_FLOAT, 4, SIZE_FP16));
 
-	/* creating a load for the proactive uniform */
-	ESSL_CHECK(address = _essl_new_variable_reference_expression(ctx->pool, sym));
-	_essl_ensure_compatible_node(address, rt_node->node);
+		/* uniform to substitute hoisted out calculations */
+		ESSL_CHECK(sym = _essl_new_variable_symbol(ctx->pool, sym_name, vec4, qual, SCOPE_GLOBAL, ADDRESS_SPACE_UNIFORM, UNKNOWN_SOURCE_OFFSET));
+		sym->opt.is_indexed_statically = ESSL_FALSE;
+		sym->opt.pilot.proactive_uniform_num = num;
+		ESSL_CHECK(sym_list = LIST_NEW(ctx->pool, symbol_list));
+		sym_list->sym = sym;
+		LIST_INSERT_BACK(ctx->tu->uniforms, sym_list);
 
-	ESSL_CHECK(load = _essl_new_load_expression(ctx->pool, VAR_KIND_UNIFORM, address));
-	_essl_ensure_compatible_node(load, rt_node->node);
-	load->hdr.type = vec4;
+		/* creating a load for the pilot uniform */
+		ESSL_CHECK(address = _essl_new_variable_reference_expression(ctx->pool, sym));
+		_essl_ensure_compatible_node(address, rt_node->node);
 
-	/* taking only necessary number of components (proactive shader always writes out 4 component) */
-	ESSL_CHECK(new_input = _essl_new_unary_expression(ctx->pool, EXPR_OP_SWIZZLE, load));
-	_essl_ensure_compatible_node(new_input, rt_node->node);
-	new_input->expr.u.swizzle = _essl_create_identity_swizzle(GET_NODE_VEC_SIZE(rt_node->node));
+		ESSL_CHECK(load = _essl_new_load_expression(ctx->pool, ADDRESS_SPACE_UNIFORM, address));
+		_essl_ensure_compatible_node(load, rt_node->node);
+		load->hdr.type = vec4;
+
+		/* taking only necessary number of components (pilot shader always writes out 4 component) */
+		ESSL_CHECK(new_input = _essl_new_unary_expression(ctx->pool, EXPR_OP_SWIZZLE, load));
+		_essl_ensure_compatible_node(new_input, rt_node->node);
+		new_input->expr.u.swizzle = _essl_create_identity_swizzle(GET_NODE_VEC_SIZE(rt_node->node));
+	}else
+	{
+		const type_specifier *inp_type;
+
+		snprintf(uni_name, 30, "?__gl_mali_pilot_gp_res_%d", num);
+		sym_name = _essl_cstring_to_string(ctx->pool, uni_name);
+		ESSL_CHECK(sym_name.ptr);
+
+		assert(ctx->desc->kind == TARGET_VERTEX_SHADER);
+		qual.variable = VAR_QUAL_PERSISTENT;
+		qual.precision = PREC_HIGH;
+
+		inp_type = rt_node->node->hdr.type;
+
+		/* variable to substitute hoisted out calculations */
+		ESSL_CHECK(sym = _essl_new_variable_symbol(ctx->pool, sym_name, inp_type, qual, SCOPE_GLOBAL, ADDRESS_SPACE_GLOBAL, UNKNOWN_SOURCE_OFFSET));
+		sym->is_persistent_variable = ESSL_TRUE;
+		sym->opt.is_indexed_statically = ESSL_FALSE;
+		sym->opt.pilot.proactive_uniform_num = num;
+		ESSL_CHECK(sym_list = LIST_NEW(ctx->pool, symbol_list));
+		sym_list->sym = sym;
+		LIST_INSERT_BACK(ctx->tu->globals, sym_list);
+
+		/* creating a load for the pilot variable */
+		ESSL_CHECK(address = _essl_new_variable_reference_expression(ctx->pool, sym));
+		_essl_ensure_compatible_node(address, rt_node->node);
+
+		ESSL_CHECK(load = _essl_new_load_expression(ctx->pool, ADDRESS_SPACE_GLOBAL, address));
+		_essl_ensure_compatible_node(load, rt_node->node);
+
+		new_input = load;
+	}
 
 	/* change uses of the hoisted out instruction
-	 * they will use the proactive uniform value */
+	 * they will use the pilot uniform value */
 	succs_list = _essl_ptrdict_lookup(&ctx->node_succs, rt_node->node);
 	for(sl = succs_list; sl != NULL; sl = sl->next)
 	{
@@ -700,78 +781,106 @@ static memerr move_calculations_to_proactive_shader(proactive_calculations_conte
 		}
 	}
 
-	/* copy all operations that will be moved (it is done in order to simplify theirs moving to the proactive shader) */
+	/* copy all operations that will be moved (it is done in order to simplify theirs moving to the pilot shader) */
 	ESSL_CHECK(copy = copy_rtc_node(ctx, rt_node->node));
+	out = copy;
 	vec_size = GET_NODE_VEC_SIZE(copy);
-	/* determine real vector size of the proactive shader result */
-	if(copy->hdr.kind == EXPR_KIND_UNARY && copy->expr.operation == EXPR_OP_SWIZZLE)
+	if(ctx->desc->kind == TARGET_FRAGMENT_SHADER)
 	{
-		unsigned i;
-		unsigned n_vec_size = vec_size;
-		for(i = 0; i < vec_size; i++)
-		{
-			if(copy->expr.u.swizzle.indices[i] < 0)
-			{
-				n_vec_size--;
-			}
-		}
-		vec_size = n_vec_size;
-	}
-	if(vec_size < 4)
-	{
-		/* if it less than 4 we need to create a vector combine with zeros in
-		 * order to please remove dead code optimization */
-		node *zero;
-		scalar_type mali200_val;
-		unsigned i;
-		node *swz;
-		
-		mali200_val = ctx->desc->float_to_scalar(0);
-		ESSL_CHECK(zero = _essl_new_constant_expression(ctx->pool, 4));
-		for(i = 0; i < 4; i++)
-		{
-			zero->expr.u.value[i] = mali200_val;
-		}
-		ESSL_CHECK(zero->hdr.type = _essl_get_type_with_given_vec_size(ctx->ts_ctx, copy->hdr.type, 4));
-
-		ESSL_CHECK(swz = _essl_new_unary_expression(ctx->pool, EXPR_OP_SWIZZLE, copy));
-		_essl_ensure_compatible_node(swz, zero);
-		swz->expr.u.swizzle = _essl_create_identity_swizzle(vec_size);
-
-		ESSL_CHECK(out = _essl_new_vector_combine_expression(ctx->pool, 2));
-		_essl_ensure_compatible_node(out, zero);
-		SET_CHILD(out, 0, swz);
-		SET_CHILD(out, 1, zero);
-		for(i = 0; i < vec_size; i++)
-		{
-			out->expr.u.combiner.mask[i] = 0;
-		}
-		for(; i < 4; i++)
-		{
-			out->expr.u.combiner.mask[i] = 1;
-		}
+		/* determine real vector size of the pilot shader result */
 		if(copy->hdr.kind == EXPR_KIND_UNARY && copy->expr.operation == EXPR_OP_SWIZZLE)
 		{
+			unsigned i;
+			unsigned n_vec_size = vec_size;
 			for(i = 0; i < vec_size; i++)
 			{
 				if(copy->expr.u.swizzle.indices[i] < 0)
 				{
-					out->expr.u.combiner.mask[i] = 1;
+					n_vec_size--;
 				}
 			}
+			vec_size = n_vec_size;
 		}
+		if(vec_size < 4)
+		{
+			/* if it less than 4 we need to create a vector combine with zeros in
+			 * order to please remove dead code optimization */
+			node *zero;
+			scalar_type mali200_val;
+			unsigned i;
+			node *swz;
+
+			mali200_val = ctx->desc->float_to_scalar(0);
+			ESSL_CHECK(zero = _essl_new_constant_expression(ctx->pool, 4));
+			for(i = 0; i < 4; i++)
+			{
+				zero->expr.u.value[i] = mali200_val;
+			}
+			ESSL_CHECK(zero->hdr.type = _essl_get_type_with_given_vec_size(ctx->ts_ctx, copy->hdr.type, 4));
+
+			ESSL_CHECK(swz = _essl_new_unary_expression(ctx->pool, EXPR_OP_SWIZZLE, copy));
+			_essl_ensure_compatible_node(swz, zero);
+			swz->expr.u.swizzle = _essl_create_identity_swizzle(vec_size);
+
+			ESSL_CHECK(out = _essl_new_vector_combine_expression(ctx->pool, 2));
+			_essl_ensure_compatible_node(out, zero);
+			SET_CHILD(out, 0, swz);
+			SET_CHILD(out, 1, zero);
+			for(i = 0; i < vec_size; i++)
+			{
+				out->expr.u.combiner.mask[i] = 0;
+			}
+			for(; i < 4; i++)
+			{
+				out->expr.u.combiner.mask[i] = 1;
+			}
+			if(copy->hdr.kind == EXPR_KIND_UNARY && copy->expr.operation == EXPR_OP_SWIZZLE)
+			{
+				for(i = 0; i < vec_size; i++)
+				{
+					if(copy->expr.u.swizzle.indices[i] < 0)
+					{
+						out->expr.u.combiner.mask[i] = 1;
+					}
+				}
+			}
+		}else
+		{
+			out = copy;
+		}
+
+		/* set pilot shader body */
+		pilot_func->body = out;
+		pilot_func->control_flow_graph->exit_block->source = out;
 	}else
 	{
-		out = copy;
-	}
+		node *store;
+		basic_block *bb = pilot_func->control_flow_graph->exit_block;
+		control_dependent_operation *p;
 
-	/* set proactive shader body */
-	proactive_func->body = out;
-	proactive_func->control_flow_graph->exit_block->source = out;
+		assert(ctx->desc->kind == TARGET_VERTEX_SHADER);
+
+		/* creating a store for the pilot variable */
+		ESSL_CHECK(address = _essl_new_variable_reference_expression(ctx->pool, sym));
+		_essl_ensure_compatible_node(address, rt_node->node);
+
+		ESSL_CHECK(store = _essl_new_store_expression(ctx->pool, ADDRESS_SPACE_GLOBAL, address, out));
+		_essl_ensure_compatible_node(store, rt_node->node);
+
+		store->hdr.is_control_dependent = ESSL_TRUE;
+		ESSL_CHECK(p = LIST_NEW(ctx->pool, control_dependent_operation));
+		p->block = bb;
+		p->op = store;
+		p->next = NULL;
+		ESSL_CHECK(_essl_ptrdict_insert(&pilot_func->control_flow_graph->control_dependence, store, p));
+		LIST_INSERT_FRONT(&bb->control_dependent_ops, p);
+		pilot_func->body = store;
+
+	}
 	/* we also need to fix (remove form structure) moved control dependent operations */
-	ESSL_CHECK(fix_control_dependent_preds(ctx, rt_node->orig_func, proactive_func, copy));
+	ESSL_CHECK(fix_control_dependent_preds(ctx, rt_node->orig_func, pilot_func, copy));
 	/* as we perform this moving several times we need to clear dictionary of copied operations
-	 * because an operation can be needed for the next proactive shader */
+	 * because an operation can be needed for the next pilot shader */
 	ESSL_CHECK(_essl_ptrdict_clear(&ctx->copied));
 
 	return MEM_OK;
@@ -787,11 +896,12 @@ static memerr move_calculations_to_proactive_shader(proactive_calculations_conte
  *
  * @returns MEM_OK if all allocations were correct
  */
-static memerr collect_rt_nodes(proactive_calculations_context *ctx, node *n, basic_block *block)
+static memerr collect_rt_nodes(pilot_calculations_context *ctx, node *n, basic_block *block)
 {
 	essl_bool is_const;
 
-	is_const = is_node_inputs_rt_constant(ctx, n, NULL);
+	ESSL_CHECK(_essl_ptrdict_clear(&ctx->rt_const_nodes));
+	is_const = is_node_inputs_rt_constant(ctx, n, NULL, NULL);
 	if(is_const)
 	{
 		node_succs_list *succs_list;
@@ -801,13 +911,48 @@ static memerr collect_rt_nodes(proactive_calculations_context *ctx, node *n, bas
 		succs_list = find_rt_const_succs(ctx, n, &has_succs);
 		if(has_succs && succs_list == NULL) /* non null variant should be further optimized */
 		{
-			ESSL_CHECK(rtc_elem = LIST_NEW(&ctx->temp_pool, run_time_constant_node));
+			ESSL_CHECK(rtc_elem = LIST_NEW(ctx->temp_pool, run_time_constant_node));
 			rtc_elem->node = n;
 			rtc_elem->orig_rt_node = n;
 			rtc_elem->orig_rt_bb = block;
 			rtc_elem->orig_func = ctx->func;
 			LIST_INSERT_FRONT(&ctx->rtc_nodes, rtc_elem);
 		}
+	}else if(0) /* disabled because MJOLL-2516 */
+	{
+		ptrdict_iter it;
+		ptrdict_entry *entry;
+		node *nn;
+		_essl_ptrdict_iter_init(&it, &ctx->rt_const_nodes);
+		while((entry = _essl_ptrdict_next_entry(&it)) != NULL)
+		{
+
+			node_succs_list *succs_list;
+			run_time_constant_node *rtc_elem;
+			essl_bool has_succs;
+			nn = _essl_ptrdict_get_key(entry);
+			if( nn == NULL)
+			{
+				break;
+			}
+			if(is_addressing_op(nn))
+			{
+				continue;
+			}
+
+			succs_list = find_rt_const_succs(ctx, nn, &has_succs);
+			if(has_succs) /* non null variant should be further optimized */
+			{
+				ESSL_CHECK(rtc_elem = LIST_NEW(ctx->temp_pool, run_time_constant_node));
+				rtc_elem->node = nn;
+				rtc_elem->orig_rt_node = nn;
+				rtc_elem->orig_rt_bb = block;
+				rtc_elem->orig_func = ctx->func;
+				LIST_INSERT_FRONT(&ctx->rtc_nodes, rtc_elem);
+			}
+
+		}
+
 	}
 
 	return MEM_OK;
@@ -817,7 +962,7 @@ static memerr collect_rt_nodes(proactive_calculations_context *ctx, node *n, bas
 /**
  * Finding  all initial candidates 
  */
-static memerr find_constant_input_calculations_nodes(proactive_calculations_context *ctx)
+static memerr find_constant_input_calculations_nodes(pilot_calculations_context *ctx)
 {
 	int j;
 
@@ -837,7 +982,11 @@ static memerr find_constant_input_calculations_nodes(proactive_calculations_cont
 		{
 			if(cd->op->hdr.kind == EXPR_KIND_STORE)
 			{
-				continue;
+				if(cd->op->expr.u.load_store.address_space != ADDRESS_SPACE_VERTEX_VARYING &&
+					cd->op->expr.u.load_store.address_space != ADDRESS_SPACE_THREAD_LOCAL)
+				{
+					continue;
+				}
 			}
 			ESSL_CHECK(collect_rt_nodes(ctx, cd->op, block));
 		}
@@ -857,35 +1006,35 @@ static memerr find_constant_input_calculations_nodes(proactive_calculations_cont
 }
 
 /**
- * Creating proactive shader function
+ * Creating pilot shader function
  *
  * @param ctx optimization context
- * @param num number of the proactive shader
+ * @param num number of the pilot shader
  *
- * @returns created proactive function
+ * @returns created pilot function
  */
-static symbol * add_proactive_func(proactive_calculations_context *ctx, unsigned num)
+static symbol * add_pilot_func(pilot_calculations_context *ctx, unsigned num)
 {
 	control_flow_graph *cfg;
 	qualifier_set medp_qual;
 	symbol_list *sl;
-	symbol *proactive_func;
+	symbol *pilot_func;
 	const type_specifier *vec4;
 	char func_name[29];
 
 	assert(num < 5);
-	snprintf(func_name, 29, "__gl_mali_proactive_shader_%d", num);
+	snprintf(func_name, 29, "__gl_mali_pilot_shader_%d", num);
 	_essl_init_qualifier_set(&medp_qual);
 	medp_qual.precision = PREC_MEDIUM;
 
 	ESSL_CHECK(vec4 = _essl_get_type_with_size(ctx->ts_ctx, TYPE_FLOAT, 4, SIZE_FP16));
 
-	ESSL_CHECK(proactive_func = _essl_new_function_symbol(ctx->pool, _essl_cstring_to_string(ctx->pool, func_name), vec4, medp_qual, UNKNOWN_SOURCE_OFFSET));
+	ESSL_CHECK(pilot_func = _essl_new_function_symbol(ctx->pool, _essl_cstring_to_string(ctx->pool, func_name), vec4, medp_qual, UNKNOWN_SOURCE_OFFSET));
 
 	ESSL_CHECK(cfg = _essl_mempool_alloc(ctx->pool, sizeof(control_flow_graph)));
 
 	ESSL_CHECK(_essl_ptrdict_init(&cfg->control_dependence, ctx->pool));
-	proactive_func->control_flow_graph = cfg;
+	pilot_func->control_flow_graph = cfg;
 
 	ESSL_CHECK(cfg->entry_block = cfg->exit_block = _essl_new_basic_block(ctx->pool));
 
@@ -894,40 +1043,40 @@ static symbol * add_proactive_func(proactive_calculations_context *ctx, unsigned
 	cfg->exit_block->cost = 1.0;
 
 	ESSL_CHECK(sl = LIST_NEW(ctx->pool, symbol_list));
-	sl->sym = proactive_func;
+	sl->sym = pilot_func;
 	LIST_INSERT_BACK(&ctx->tu->functions, sl);
 
 	ESSL_CHECK(sl = LIST_NEW(ctx->pool, symbol_list));
-	sl->sym = proactive_func;
+	sl->sym = pilot_func;
 	LIST_INSERT_BACK(&ctx->tu->proactive_funcs, sl);
-	proactive_func->is_proactive_func = ESSL_TRUE;
+	pilot_func->opt.pilot.is_proactive_func = ESSL_TRUE;
 
-	return proactive_func;
+	return pilot_func;
 
 }
 
 /**
- * Find most important run time constant calculation and move them to specail proactive shaders
+ * Find most important run time constant calculation and move them to specail pilot shaders
  */
-static memerr optimize_constant_input_calculations(proactive_calculations_context *ctx)
+static memerr optimize_constant_input_calculations(pilot_calculations_context *ctx)
 {
 	if(ctx->rtc_nodes != NULL)
 	{
 		run_time_constant_node *elem;
 		unsigned num = 0;
-		ctx->rtc_nodes = LIST_SORT(ctx->rtc_nodes, compare_rtc_nodes_by_weight, run_time_constant_node);
-
+		
 		/* we add at least 1 instructon and some additional overhead in the driver
 		 * so the optimization will be applied if we remove at least 5 nodes from the main shader,
 		 * but not more than 4*/
-		for(elem = ctx->rtc_nodes; elem != NULL && num < 4; elem = elem->next, num++)
+		for(elem = ctx->rtc_nodes; elem != NULL && num < 4; elem = elem->next)
 		{
-			if(elem->weight > 5)
+			if(elem->weight > MIN_ALLOWED_WEIGHT)
 			{
-				symbol *proactive_func;
-				ESSL_CHECK(proactive_func = add_proactive_func(ctx, num));
-				ESSL_CHECK(move_calculations_to_proactive_shader(ctx, proactive_func, elem, num));
+				symbol *pilot_func;
+				ESSL_CHECK(pilot_func = add_pilot_func(ctx, num));
+				ESSL_CHECK(move_calculations_to_pilot_shader(ctx, pilot_func, elem, num));
 				ctx->applied = ESSL_TRUE;
+				num++;
 			}
 		}
 	}
@@ -937,7 +1086,7 @@ static memerr optimize_constant_input_calculations(proactive_calculations_contex
 /**
  * Find run time constant calculations for the function
  */
-static memerr find_constant_input_calculations_for_func(proactive_calculations_context *ctx, symbol *function)
+static memerr find_constant_input_calculations_for_func(pilot_calculations_context *ctx, symbol *function)
 {
 	ctx->func = function;
 	ctx->cfg = function->control_flow_graph;
@@ -951,73 +1100,38 @@ static memerr find_constant_input_calculations_for_func(proactive_calculations_c
  * Driver function for the optimization
  * To be called from middle passes run.
  */
-memerr _essl_optimise_constant_input_calculations(mempool *pool, typestorage_context *typestor_ctx, translation_unit* tu)
+memerr _essl_optimise_constant_input_calculations(pass_run_context *pr_ctx, translation_unit* tu)
 {
-	proactive_calculations_context ctx;
+	pilot_calculations_context ctx;
 	symbol_list *sl;
 
-	ESSL_CHECK(_essl_mempool_init(&ctx.temp_pool, 0, pool->tracker));
-	ctx.pool = pool;
+	ctx.pool = pr_ctx->pool;
+	ctx.temp_pool = pr_ctx->tmp_pool;
 	ctx.desc = tu->desc;
 	ctx.tu = tu;
-	ctx.ts_ctx = typestor_ctx;
+	ctx.ts_ctx = pr_ctx->ts_ctx;
 	ctx.rtc_nodes = NULL;
 	ctx.applied = ESSL_FALSE;
 
-	if(_essl_ptrdict_init(&ctx.node_succs, &ctx.temp_pool) != MEM_OK)
-	{
-		_essl_mempool_destroy(&ctx.temp_pool);
-		return MEM_ERROR;
-	}
-	if(_essl_ptrset_init(&ctx.visited, &ctx.temp_pool) != MEM_OK)
-	{
-		_essl_mempool_destroy(&ctx.temp_pool);
-		return MEM_ERROR;
-	}
-	if(_essl_ptrset_init(&ctx.hoist_points, &ctx.temp_pool) != MEM_OK)
-	{
-		_essl_mempool_destroy(&ctx.temp_pool);
-		return MEM_ERROR;
-	}
-	if(_essl_ptrdict_init(&ctx.copied, &ctx.temp_pool) != MEM_OK) 
-	{
-		_essl_mempool_destroy(&ctx.temp_pool);
-		return MEM_ERROR;
-	}
-	if(_essl_ptrset_init(&ctx.rt_const_nodes, &ctx.temp_pool) != MEM_OK)
-	{
-		_essl_mempool_destroy(&ctx.temp_pool);
-		return MEM_ERROR;
-	}
-
+	ESSL_CHECK(_essl_ptrdict_init(&ctx.node_succs, pr_ctx->tmp_pool));
+	ESSL_CHECK(_essl_ptrset_init(&ctx.visited, pr_ctx->tmp_pool));
+	ESSL_CHECK(_essl_ptrset_init(&ctx.hoist_points, pr_ctx->tmp_pool));
+	ESSL_CHECK(_essl_ptrdict_init(&ctx.copied, pr_ctx->tmp_pool)) ;
+	ESSL_CHECK(_essl_ptrdict_init(&ctx.rt_const_nodes, pr_ctx->tmp_pool));
 	for(sl = tu->functions; sl != 0; sl = sl->next)
 	{
-		if(find_constant_input_calculations_for_func(&ctx, sl->sym) != MEM_OK)
-		{
-			_essl_mempool_destroy(&ctx.temp_pool);
-			return MEM_ERROR;
-		}
+		ESSL_CHECK(find_constant_input_calculations_for_func(&ctx, sl->sym));
 	}
 
-	if(optimize_constant_input_calculations(&ctx) != MEM_OK)
-	{
-		_essl_mempool_destroy(&ctx.temp_pool);
-		return MEM_ERROR;
-	}
+	ESSL_CHECK(optimize_constant_input_calculations(&ctx));
 	if(ctx.applied)
 	{
 		for(sl = tu->functions; sl != 0; sl = sl->next)
 		{
-			if(_essl_compute_dominance_information(pool, sl->sym) != MEM_OK)
-			{
-				_essl_mempool_destroy(&ctx.temp_pool);
-				return MEM_ERROR;
-			}
+			ESSL_CHECK(_essl_compute_dominance_information(ctx.pool, sl->sym));
 			_essl_validate_control_flow_graph(sl->sym->control_flow_graph);
 		}
 	}
-
-	_essl_mempool_destroy(&ctx.temp_pool);
 
 	return MEM_OK;
 

@@ -17,7 +17,6 @@
 #include <linux/kernel.h>
 #include <linux/fs.h>
 #include <linux/device.h>
-#include <linux/version.h>
 #include <linux/module.h>
 #include "mali_kernel_license.h"
 #include "mali_kernel_common.h"
@@ -48,6 +47,7 @@
 
 #define POWER_BUFFER_SIZE 3
 
+struct device *mali_device;
 static struct dentry *mali_debugfs_dir = NULL;
 
 typedef enum
@@ -1041,7 +1041,6 @@ static int mali_sysfs_user_settings_register(void)
 int mali_sysfs_register(struct mali_dev *device, dev_t dev, const char *mali_dev_name)
 {
 	int err = 0;
-	struct device * mdev;
 
 	device->mali_class = class_create(THIS_MODULE, mali_dev_name);
 	if (IS_ERR(device->mali_class))
@@ -1049,10 +1048,10 @@ int mali_sysfs_register(struct mali_dev *device, dev_t dev, const char *mali_dev
 		err = PTR_ERR(device->mali_class);
 		goto init_class_err;
 	}
-	mdev = device_create(device->mali_class, NULL, dev, NULL, mali_dev_name);
-	if (IS_ERR(mdev))
+	mali_device = device_create(device->mali_class, NULL, dev, NULL, mali_dev_name);
+	if (IS_ERR(mali_device))
 	{
-		err = PTR_ERR(mdev);
+		err = PTR_ERR(mali_device);
 		goto init_mdev_err;
 	}
 

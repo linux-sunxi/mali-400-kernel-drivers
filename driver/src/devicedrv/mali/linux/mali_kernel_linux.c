@@ -28,6 +28,7 @@
 #include "mali_kernel_sysfs.h"
 #include "mali_platform.h"
 #include "mali_kernel_license.h"
+#include "mali_dma_buf.h"
 
 /* Streamline support for the Mali driver */
 #if defined(CONFIG_TRACEPOINTS) && MALI_TIMELINE_PROFILING_ENABLED
@@ -249,13 +250,26 @@ static int mali_mmap(struct file * filp, struct vm_area_struct * vma)
 		return -EFAULT;
 	}
 
-	MALI_DEBUG_PRINT(4, ("MMap() handler: start=0x%08X, phys=0x%08X, size=0x%08X\n", (unsigned int)vma->vm_start, (unsigned int)(vma->vm_pgoff << PAGE_SHIFT), (unsigned int)(vma->vm_end - vma->vm_start)) );
+	MALI_DEBUG_PRINT(4, ("MMap() handler: start=0x%08X, phys=0x%08X, size=0x%08X vma->flags 0x%08x\n", (unsigned int)vma->vm_start, (unsigned int)(vma->vm_pgoff << PAGE_SHIFT), (unsigned int)(vma->vm_end - vma->vm_start), vma->vm_flags));
 
 	/* Re-pack the arguments that mmap() packed for us */
 	args.ctx = session_data;
 	args.phys_addr = vma->vm_pgoff << PAGE_SHIFT;
 	args.size = vma->vm_end - vma->vm_start;
 	args.ukk_private = vma;
+
+	if ( VM_SHARED== (VM_SHARED  & vma->vm_flags))
+	{
+		args.cache_settings = MALI_CACHE_STANDARD ;
+		MALI_DEBUG_PRINT(3,("Allocate - Standard - Size: %d kb\n", args.size/1024));
+	}
+	else
+	{
+		args.cache_settings = MALI_CACHE_GP_READ_ALLOCATE;
+		MALI_DEBUG_PRINT(3,("Allocate - GP Cached - Size: %d kb\n", args.size/1024));
+	}
+	/* Setting it equal to VM_SHARED and not Private, which would have made the later io_remap fail for MALI_CACHE_GP_READ_ALLOCATE */
+	vma->vm_flags = 0x000000fb;
 
 	/* Call the common mmap handler */
 	MALI_CHECK(_MALI_OSK_ERR_OK ==_mali_ukk_mem_mmap( &args ), -EFAULT);
@@ -344,14 +358,6 @@ static int mali_ioctl(struct inode *inode, struct file *filp, unsigned int cmd, 
 
 	switch(cmd)
 	{
-		case MALI_IOC_GET_SYSTEM_INFO_SIZE:
-			err = get_system_info_size_wrapper(session_data, (_mali_uk_get_system_info_size_s __user *)arg);
-			break;
-
-		case MALI_IOC_GET_SYSTEM_INFO:
-			err = get_system_info_wrapper(session_data, (_mali_uk_get_system_info_s __user *)arg);
-			break;
-
 		case MALI_IOC_WAIT_FOR_NOTIFICATION:
 			err = wait_for_notification_wrapper(session_data, (_mali_uk_wait_for_notification_s __user *)arg);
 			break;
@@ -452,6 +458,26 @@ static int mali_ioctl(struct inode *inode, struct file *filp, unsigned int cmd, 
 		case MALI_IOC_MEM_ATTACH_UMP:
 		case MALI_IOC_MEM_RELEASE_UMP: /* FALL-THROUGH */
 			MALI_DEBUG_PRINT(2, ("UMP not supported\n"));
+			err = -ENOTTY;
+			break;
+#endif
+
+#ifdef CONFIG_DMA_SHARED_BUFFER
+		case MALI_IOC_MEM_ATTACH_DMA_BUF:
+			err = mali_attach_dma_buf(session_data, (_mali_uk_attach_dma_buf_s __user *)arg);
+			break;
+
+		case MALI_IOC_MEM_RELEASE_DMA_BUF:
+			err = mali_release_dma_buf(session_data, (_mali_uk_release_dma_buf_s __user *)arg);
+			break;
+
+		case MALI_IOC_MEM_DMA_BUF_GET_SIZE:
+			err = mali_dma_buf_get_size(session_data, (_mali_uk_dma_buf_get_size_s __user *)arg);
+			break;
+#else
+
+		case MALI_IOC_MEM_DMA_BUF_GET_SIZE: /* FALL-THROUGH */
+			MALI_DEBUG_PRINT(2, ("DMA-BUF not supported\n"));
 			err = -ENOTTY;
 			break;
 #endif

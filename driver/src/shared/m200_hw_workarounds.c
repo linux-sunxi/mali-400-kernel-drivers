@@ -11,6 +11,75 @@
 #include <mali_system.h>
 #include "m200_gp_frame_builder_struct.h"
 
+#if HARDWARE_ISSUE_7320
+#include <regs/MALIGP2/mali_gp_vs_config.h>
+#endif
+
+
+#if HARDWARE_ISSUE_7320
+typedef struct issue_7320_flush_sub_data
+{
+	u64 cmdlist[8];
+	u32 input[4];
+	u32 output[4];
+	u32 dummy[(HARDWARE_ISSUE_7320_OUTSTANDING_WRITES+1)/2*8];
+} issue_7320_flush_sub_data;
+
+mali_mem_handle _mali_frame_builder_create_flush_command_list_for_bug_7320(mali_base_ctx_handle base_ctx)
+{
+	mali_mem_handle handle;
+	issue_7320_flush_sub_data *data;
+	issue_7320_flush_sub_data *mali_data;
+	int i;
+
+	handle = _mali_mem_alloc(base_ctx, sizeof(issue_7320_flush_sub_data), 64, MALI_GP_READ|MALI_CPU_WRITE);
+	if (MALI_NO_HANDLE == handle)
+	{
+		return MALI_NO_HANDLE;
+	}
+
+	data = _mali_mem_ptr_map_area(handle, 0, sizeof(issue_7320_flush_sub_data), 64, MALI_MEM_PTR_WRITABLE|MALI_MEM_PTR_NO_PRE_UPDATE);
+	if (NULL == data)
+	{
+		_mali_mem_free(handle);
+		return MALI_NO_HANDLE;
+	}
+	mali_data = (issue_7320_flush_sub_data *)_mali_mem_mali_addr_get(handle, 0);
+
+	/* Write commandlist */
+	i = 0;
+	data->cmdlist[i++] = GP_VS_COMMAND_FLUSH_WRITEBACK_BUF();
+	data->cmdlist[i++] = GP_VS_COMMAND_WRITE_INPUT_OUTPUT_CONF_REGS((u32)&mali_data->input[0],  0, 1);
+	data->cmdlist[i++] = GP_VS_COMMAND_WRITE_INPUT_OUTPUT_CONF_REGS((u32)&mali_data->output[0], 1, 2);
+	data->cmdlist[i++] = GP_VS_COMMAND_WRITE_CONF_REG(GP_VS_CONF_REG_OPMOD_CREATE(1, 2), GP_VS_CONF_REG_OPMOD);
+	data->cmdlist[i++] = GP_VS_COMMAND_WRITE_CONF_REG(0, GP_VS_CONF_REG_PROG_PARAM); /* Program from 0 to 0 */
+	data->cmdlist[i++] = GP_VS_COMMAND_SHADE_VERTICES(GP_PLBU_OPMODE_DRAW_ELEMENTS, (HARDWARE_ISSUE_7320_OUTSTANDING_WRITES+1)/2);
+	data->cmdlist[i++] = GP_VS_COMMAND_FLUSH_WRITEBACK_BUF();
+	data->cmdlist[i++] = GP_VS_COMMAND_LIST_RETURN();
+
+	/* Write input specifier */
+	data->input[0] = (u32)&mali_data->dummy[0];
+	data->input[1] = GP_VS_CONF_REG_INP_SPEC_CREATE(GP_VS_VSTREAM_FORMAT_NO_DATA, 0, 0);
+
+	/* Write output specifiers */
+	data->output[0] = (u32)&mali_data->dummy[0];
+	data->output[1] = GP_VS_CONF_REG_OUTP_SPEC_CREATE(GP_VS_VSTREAM_FORMAT_1_FIX_U8, 0, 32);
+	data->output[2] = (u32)&mali_data->dummy[4];
+	data->output[3] = GP_VS_CONF_REG_OUTP_SPEC_CREATE(GP_VS_VSTREAM_FORMAT_1_FIX_U8, 0, 32);
+
+	_mali_mem_ptr_unmap_area(handle);
+
+	return handle;
+}
+
+MALI_EXPORT mali_addr _mali_frame_builder_get_flush_subroutine( mali_frame_builder *frame_builder )
+{
+	return _mali_mem_mali_addr_get(frame_builder->flush_commandlist_subroutine, 0);
+}
+#endif
+
+
+
 #if HARDWARE_ISSUE_4126
 MALI_STATIC mali_mem_handle _mali_frame_builder_create_nop_shader(mali_base_ctx_handle base_ctx, int instructions)
 {

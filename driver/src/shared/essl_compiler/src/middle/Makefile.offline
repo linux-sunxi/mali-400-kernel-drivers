@@ -15,17 +15,13 @@ MALI400_COMPILER_MIDDLE_TEST_SRCS = \
 	$(MALI400_COMPILER_MIDDLE_DIR)/dominator.c
 
 MALI400_COMPILER_MIDDLE_NOTEST_SRCS = \
-	$(MALI400_COMPILER_MIDDLE_DIR)/make_basic_blocks.c \
 	$(MALI400_COMPILER_MIDDLE_DIR)/middle.c \
 	$(MALI400_COMPILER_MIDDLE_DIR)/control_deps.c \
 	$(MALI400_COMPILER_MIDDLE_DIR)/optimise_cse.c \
-	$(MALI400_COMPILER_MIDDLE_DIR)/optimise_loop_entry.c \
-	$(MALI400_COMPILER_MIDDLE_DIR)/optimise_inline_functions.c \
 	$(MALI400_COMPILER_MIDDLE_DIR)/optimise_basic_blocks.c \
 	$(MALI400_COMPILER_MIDDLE_DIR)/optimise_constant_fold.c \
 	$(MALI400_COMPILER_MIDDLE_DIR)/eliminate_complex_ops.c \
 	$(MALI400_COMPILER_MIDDLE_DIR)/remove_dead_code.c \
-	$(MALI400_COMPILER_MIDDLE_DIR)/ssa.c \
 	$(MALI400_COMPILER_MIDDLE_DIR)/conditional_select.c \
 	$(MALI400_COMPILER_MIDDLE_DIR)/rewrite_sampler_accesses.c \
 	$(MALI400_COMPILER_MIDDLE_DIR)/expand_builtin_functions.rw \

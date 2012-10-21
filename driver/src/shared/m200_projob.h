@@ -14,6 +14,8 @@
 #include <mali_system.h>
 #include <base/mali_memory.h>
 #include <regs/MALI200/mali_pp_cmd.h>
+#include <shared/binary_shader/bs_object.h>
+
 
 /* The projob struct. 
  * Holds all relevant data for a projob
@@ -67,14 +69,6 @@ struct mali_projob
     mali_addr  output_mali_addr;
 
 	u32 num_pp_drawcalls_added_to_the_current_pp_job;
-
-	/* the sync handle is allocated on the first draw
-	 * and lasts until the next flush or reset. */
-	mali_sync_handle sync_handle;
-	mali_frame_cb_func cb_func;
-	mali_frame_cb_param cb_param;
-
-
 };
 
 /* forward declaration */
@@ -96,6 +90,21 @@ struct mali_internal_frame;
  * NOTE: The framebuilder must be writelocked before calling this function.
  */
 mali_addr _mali_projob_add_pp_drawcall(struct mali_frame_builder* fbuilder, mali_addr rsw_address);
+
+
+/**
+ * Add a pp drawcall to the projob struct
+ *
+ * The function will add one draw command to the VS CMD list. 
+ * 
+ * @param fbuilder    - The framebuilder to add a projobdrawcall to
+ * @param num_pass - number of the vertex shader projob pass.
+ * @return            - increased number of vs cmds list. 
+ *
+ * NOTE: This function assumes that the normal uniforms have been loaded prior to call it.
+ */
+u32 _mali_projob_add_gp_drawcall(struct mali_frame_builder* frame_builder, u64* cmnds, struct bs_shaderpass* projob_pass);
+
 
 /**
  * Flush the projob's pp drawcalls. 
@@ -137,17 +146,6 @@ void _mali_projob_reset(struct mali_internal_frame* frame);
  * @return mali_bool - TRUE or FALSE. 
  **/
 mali_bool _mali_projob_have_drawcalls(struct mali_internal_frame* frame);
-
-/**
- * Set up a callback that is executed when the next flush is completed. 
- * The callback state lasts until the frame is reset 
- * 
- * @param frame    - The frame on which to set up a callback 
- * @param cb_func  - The callback function to execute once all projobs are done
- * @param cb_param - The parameter to the cb_func
- **/
-void _mali_projob_set_flush_callback(struct mali_internal_frame* frame, mali_frame_cb_func cb_func, mali_frame_cb_param cb_param);
-
 
 #endif /* _M200_PROJOB_H_ */
 

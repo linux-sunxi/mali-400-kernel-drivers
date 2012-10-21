@@ -32,6 +32,9 @@ struct mali_pp_job *mali_pp_job_create(struct mali_session_data *session, _mali_
 		job->session = session;
 		job->id = id;
 		job->user_id = args->user_job_ptr;
+		job->barrier = args->flags & _MALI_PP_JOB_FLAG_BARRIER ? MALI_TRUE : MALI_FALSE;
+		job->active_barrier = job->barrier;
+		job->no_notification = args->flags & _MALI_PP_JOB_FLAG_NO_NOTIFICATION ? MALI_TRUE : MALI_FALSE;
 		_mali_osk_memcpy(job->frame_registers, args->frame_registers, sizeof(job->frame_registers));
 		_mali_osk_memcpy(job->frame_registers_addr_frame, args->frame_registers_addr_frame, sizeof(job->frame_registers_addr_frame));
 		_mali_osk_memcpy(job->frame_registers_addr_stack, args->frame_registers_addr_stack, sizeof(job->frame_registers_addr_stack));

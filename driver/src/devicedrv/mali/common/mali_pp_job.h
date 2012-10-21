@@ -48,6 +48,9 @@ struct mali_pp_job
 	u32 tid;                                           /**< Thread ID of submitting thread */
 	u32 frame_builder_id;                              /**< id of the originating frame builder */
 	u32 flush_id;                                      /**< flush id within the originating frame builder */
+	mali_bool barrier;                                 /**< [in] MALI_TRUE means wait for all my previous jobs to complete before scheduling this one */
+	mali_bool active_barrier;                          /**< [in] Changes from MALI_TRUE to MALI_FALSE when barrier has been resolved */
+	mali_bool no_notification;                         /**< [in] MALI_TRUE means do not notify user space when this job has completed */
 };
 
 struct mali_pp_job *mali_pp_job_create(struct mali_session_data *session, _mali_uk_pp_start_job_s *args, u32 id);
@@ -215,6 +218,21 @@ MALI_STATIC_INLINE mali_bool mali_pp_job_was_success(struct mali_pp_job *job)
 		return MALI_TRUE;
 	}
 	return MALI_FALSE;
+}
+
+MALI_STATIC_INLINE mali_bool mali_pp_job_has_active_barrier(struct mali_pp_job *job)
+{
+	return job->active_barrier;
+}
+
+MALI_STATIC_INLINE void mali_pp_job_barrier_enforced(struct mali_pp_job *job)
+{
+	job->active_barrier = MALI_FALSE;
+}
+
+MALI_STATIC_INLINE mali_bool mali_pp_job_use_no_notification(struct mali_pp_job *job)
+{
+	return job->no_notification;
 }
 
 MALI_STATIC_INLINE u32 mali_pp_job_get_perf_counter_flag(struct mali_pp_job *job)

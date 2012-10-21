@@ -9,6 +9,8 @@
  */
 #include "common/essl_system.h"
 #include "middle/rewrite_sampler_accesses.h"
+#include "common/basic_block.h"
+#include "common/ptrset.h"
 
 typedef struct 
 {
@@ -88,26 +90,20 @@ static memerr handle_block(rewrite_sampler_accesses_context *ctx, basic_block *b
 
 
 
-memerr _essl_rewrite_sampler_accesses(mempool *pool, typestorage_context *ts_ctx, control_flow_graph *cfg)
+memerr _essl_rewrite_sampler_accesses(pass_run_context *pr_ctx, symbol *func)
 {
 
 	rewrite_sampler_accesses_context ctx;
 	unsigned int i;
 
-	mempool visit_pool;
+	ctx.pool = pr_ctx->pool;
+	ctx.cfg = func->control_flow_graph;
+	ctx.typestor_ctx = pr_ctx->ts_ctx;
 
-	ESSL_CHECK(_essl_mempool_init(&visit_pool, 0, _essl_mempool_get_tracker(pool)));
-	ctx.pool = pool;
-	ctx.cfg = cfg;
-	ctx.typestor_ctx = ts_ctx;
-
-	if(!_essl_ptrset_init(&ctx.visited, &visit_pool)) goto error;
-	for (i = 0 ; i < cfg->n_blocks ; i++) {
-		if(!handle_block(&ctx, cfg->postorder_sequence[i])) goto error;
+	ESSL_CHECK(_essl_ptrset_init(&ctx.visited, pr_ctx->tmp_pool));
+	for (i = 0 ; i < ctx.cfg->n_blocks ; i++) 
+	{
+		ESSL_CHECK(handle_block(&ctx, ctx.cfg->postorder_sequence[i]));
 	}
-	_essl_mempool_destroy(&visit_pool);
 	return MEM_OK;
-error:
-	_essl_mempool_destroy(&visit_pool);
-	return MEM_ERROR;
 }

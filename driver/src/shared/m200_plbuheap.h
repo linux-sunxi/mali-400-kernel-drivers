@@ -70,25 +70,5 @@ void _mali_plbuheap_add_usecount(mali_plbuheap* heap);
 */
 void _mali_plbuheap_dec_usecount(mali_plbuheap* heap);
 
-/**
- * Resets the PLBU heap back down to the size given when it was allocated. 
- * If the PLBU heap has been grown one or more times, this function will 
- * free the "grown" memory. This operation is faster than
- * just reallocating the plbuheap structure. 
- *
- * If the PLBU heap is in use within a frame, this operation will be deferred. 
- * Calling this function while the heap is in use is thus safe. 
- *
- * Side note: 
- * HARDWARE_ISSUE_3251 prevents setting the end register of PLBU 
- * heaps from the GPU. Resizing and as a result, resetting the heap 
- * can as such not happen. If this issue is present, the function does nothing.  
- *
- * @param heap     The heap to reset. 
- *
- */
-void _mali_plbuheap_reset(mali_plbuheap* heap);
-
-
 #endif /* _M200_PLBUHEAP_H_ */
 

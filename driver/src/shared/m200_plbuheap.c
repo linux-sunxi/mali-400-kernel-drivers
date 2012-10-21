@@ -98,18 +98,3 @@ void _mali_plbuheap_dec_usecount(mali_plbuheap* heap)
 	}
 }
 
-void _mali_plbuheap_reset( mali_plbuheap* heap )
-{
-#if !defined(HARDWARE_ISSUE_3251)
-
-	MALI_DEBUG_ASSERT_POINTER( heap );
-	MALI_DEBUG_ASSERT_HANDLE( heap->plbu_heap );
-
-	heap->reset = MALI_TRUE;
-	if( _mali_sys_atomic_get( &heap->use_count) > 0 )
-	{
-		_mali_mem_heap_reset( heap->plbu_heap );
-		heap->reset = MALI_FALSE;
-	}
-#endif
-}
