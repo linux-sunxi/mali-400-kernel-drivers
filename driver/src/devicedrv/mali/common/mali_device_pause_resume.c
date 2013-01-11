@@ -15,32 +15,28 @@
 
 #include "mali_gp_scheduler.h"
 #include "mali_pp_scheduler.h"
-#include "mali_pm.h"
+#include "mali_group.h"
 
 void mali_dev_pause(mali_bool *power_is_on)
 {
-	mali_gp_scheduler_suspend();
-	mali_pp_scheduler_suspend();
+	mali_bool power_is_on_tmp;
 
-	/*
-	 * Take and hold the PM lock to be sure we don't change power state as well.
-	 * (it might be unsafe to for instance change frequency if Mali GPU is powered off)
-	 */
-	mali_pm_execute_state_change_lock();	
+	/* Locking the current power state - so it will not switch from being ON to OFF, but it might remain OFF */
+	power_is_on_tmp = _mali_osk_pm_dev_ref_add_no_power_on();
 	if (NULL != power_is_on)
 	{
-		*power_is_on = mali_pm_is_powered_on();
+		*power_is_on = power_is_on_tmp;
 	}
+
+	mali_gp_scheduler_suspend();
+	mali_pp_scheduler_suspend();
 }
 
 void mali_dev_resume(void)
 {
-	mali_pm_execute_state_change_unlock();
 	mali_gp_scheduler_resume();
 	mali_pp_scheduler_resume();
-}
 
-/*
-EXPORT_SYMBOL(mali_dev_pause);
-EXPORT_SYMBOL(mali_dev_resume);
-*/
+	/* Release our PM reference, as it is now safe to turn of the GPU again */
+	_mali_osk_pm_dev_ref_dec_no_power_on();
+}

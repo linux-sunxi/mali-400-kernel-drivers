@@ -369,7 +369,7 @@ _mali_osk_errcode_t _mali_ukk_map_external_mem( _mali_uk_map_external_mem_s *arg
  */
 _mali_osk_errcode_t _mali_ukk_unmap_external_mem( _mali_uk_unmap_external_mem_s *args );
 
-#if MALI_USE_UNIFIED_MEMORY_PROVIDER != 0
+#if defined(CONFIG_MALI400_UMP)
 /** @brief Map UMP memory into Mali
  * @param args see _mali_uk_attach_ump_mem_s in mali_utgard_uk_types.h
  * @return _MALI_OSK_ERR_OK on success, otherwise a suitable _mali_osk_errcode_t on failure.
@@ -380,7 +380,7 @@ _mali_osk_errcode_t _mali_ukk_attach_ump_mem( _mali_uk_attach_ump_mem_s *args );
  * @return _MALI_OSK_ERR_OK on success, otherwise a suitable _mali_osk_errcode_t on failure.
  */
 _mali_osk_errcode_t _mali_ukk_release_ump_mem( _mali_uk_release_ump_mem_s *args );
-#endif /* MALI_USE_UNIFIED_MEMORY_PROVIDER */
+#endif /* CONFIG_MALI400_UMP */
 
 /** @brief Determine virtual-to-physical mapping of a contiguous memory range
  * (optional)
@@ -453,7 +453,7 @@ _mali_osk_errcode_t _mali_ukk_va_to_mali_pa( _mali_uk_va_to_mali_pa_s * args );
  * @param uargs see _mali_uk_pp_start_job_s in "mali_utgard_uk_types.h". Use _mali_osk_copy_from_user to retrieve data!
  * @return _MALI_OSK_ERR_OK on success, otherwise a suitable _mali_osk_errcode_t on failure.
  */
-_mali_osk_errcode_t _mali_ukk_pp_start_job( void *ctx, _mali_uk_pp_start_job_s *uargs );
+_mali_osk_errcode_t _mali_ukk_pp_start_job( void *ctx, _mali_uk_pp_start_job_s *uargs, int *fence );
 
 /** @brief Returns the number of Fragment Processors in the system
  *
@@ -538,7 +538,7 @@ _mali_osk_errcode_t _mali_ukk_gp_suspend_response( _mali_uk_gp_suspend_response_
 
 /** @} */ /* end group _mali_uk_gp */
 
-#if MALI_TIMELINE_PROFILING_ENABLED
+#if defined(CONFIG_MALI400_PROFILING)
 /** @addtogroup _mali_uk_profiling U/K Timeline profiling module
  * @{ */
 
@@ -606,6 +606,12 @@ _mali_osk_errcode_t _mali_ukk_sw_counters_report(_mali_uk_sw_counters_report_s *
 /** @} */ /* end group uddapi */
 
 u32 _mali_ukk_report_memory_usage(void);
+
+u32 _mali_ukk_utilization_gp_pp(void);
+
+u32 _mali_ukk_utilization_gp(void);
+
+u32 _mali_ukk_utilization_pp(void);
 
 #ifdef __cplusplus
 }

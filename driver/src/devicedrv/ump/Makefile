@@ -13,6 +13,14 @@
 export ARCH ?= arm
 BUILD ?= debug
 
+check_cc2 = \
+	$(shell if $(1) -S -o /dev/null -xc /dev/null > /dev/null 2>&1; \
+	then \
+		echo "$(2)"; \
+	else \
+		echo "$(3)"; \
+	fi ;)
+
 # Check that required parameters are supplied.
 ifeq ($(CONFIG),)
 $(error "CONFIG must be specified.")
@@ -28,8 +36,8 @@ endif
 KDIR-$(shell uname -m):=/lib/modules/$(shell uname -r)/build
 
 ifeq ($(ARCH), arm)
-	# when compiling for ARM we're cross compiling
-	export CROSS_COMPILE ?= arm-none-linux-gnueabi-
+# when compiling for ARM we're cross compiling
+export CROSS_COMPILE ?= $(call check_cc2, arm-linux-gnueabi-gcc, arm-linux-gnueabi-, arm-none-linux-gnueabi-)
 endif
 
 # look up KDIR based om CPU selection

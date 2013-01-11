@@ -76,12 +76,25 @@ typedef enum
 
 /**
  * These events are applicable when the type MALI_PROFILING_EVENT_TYPE_START/STOP is used from software channel
+ * to inform whether the core is physical or virtual
  */
 typedef enum
 {
-	MALI_PROFILING_EVENT_REASON_START_STOP_SW_NONE      = 0,
-	MALI_PROFILING_EVENT_REASON_START_STOP_MALI         = 1,
-	MALI_PROFILING_EVENT_REASON_START_STOP_BOTTOM_HALF  = 2,
+	MALI_PROFILING_EVENT_REASON_START_STOP_HW_PHYSICAL  = 0,
+	MALI_PROFILING_EVENT_REASON_START_STOP_HW_VIRTUAL   = 1,
+} cinstr_profiling_event_reason_start_stop_hw_t;
+
+/**
+ * These events are applicable when the type MALI_PROFILING_EVENT_TYPE_START/STOP is used from software channel
+ */
+typedef enum
+{
+	/*MALI_PROFILING_EVENT_REASON_START_STOP_SW_NONE            = 0,*/
+	MALI_PROFILING_EVENT_REASON_START_STOP_SW_MALI            = 1,
+	MALI_PROFILING_EVENT_REASON_START_STOP_SW_CALLBACK_THREAD = 2,
+	MALI_PROFILING_EVENT_REASON_START_STOP_SW_WORKER_THREAD   = 3,
+	MALI_PROFILING_EVENT_REASON_START_STOP_SW_BOTTOM_HALF     = 4,
+	MALI_PROFILING_EVENT_REASON_START_STOP_SW_UPPER_HALF      = 5,
 } cinstr_profiling_event_reason_start_stop_sw_t;
 
 /**
@@ -89,7 +102,7 @@ typedef enum
  */
 typedef enum
 {
-	MALI_PROFILING_EVENT_REASON_SUSPEND_RESUME_SW_NONE                   =  0, /* NOT used */
+	MALI_PROFILING_EVENT_REASON_SUSPEND_RESUME_SW_NONE                   =  0, /* used */
 	MALI_PROFILING_EVENT_REASON_SUSPEND_RESUME_SW_PIPELINE_FULL          =  1, /* NOT used */
 	MALI_PROFILING_EVENT_REASON_SUSPEND_RESUME_SW_VSYNC                  = 26, /* used in some build configurations */
 	MALI_PROFILING_EVENT_REASON_SUSPEND_RESUME_SW_FB_IFRAME_WAIT         = 27, /* USED */
@@ -124,6 +137,9 @@ typedef enum
 {
 	MALI_PROFILING_EVENT_REASON_SINGLE_GPU_NONE              = 0,
 	MALI_PROFILING_EVENT_REASON_SINGLE_GPU_FREQ_VOLT_CHANGE  = 1,
+	MALI_PROFILING_EVENT_REASON_SINGLE_GPU_L20_COUNTERS      = 2,
+	MALI_PROFILING_EVENT_REASON_SINGLE_GPU_L21_COUNTERS      = 3,
+	MALI_PROFILING_EVENT_REASON_SINGLE_GPU_L22_COUNTERS      = 4,
 } cinstr_profiling_event_reason_single_gpu_t;
 
 /**

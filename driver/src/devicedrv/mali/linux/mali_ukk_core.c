@@ -16,6 +16,7 @@
 #include "mali_kernel_common.h"
 #include "mali_session.h"
 #include "mali_ukk_wrappers.h"
+#include "mali_sync.h"
 
 int get_api_version_wrapper(struct mali_session_data *session_data, _mali_uk_get_api_version_s __user *uargs)
 {
@@ -102,3 +103,48 @@ int get_user_settings_wrapper(struct mali_session_data *session_data, _mali_uk_g
 
 	return 0;
 }
+
+#ifdef CONFIG_SYNC
+int stream_create_wrapper(struct mali_session_data *session_data, _mali_uk_stream_create_s __user *uargs)
+{
+	_mali_uk_stream_create_s kargs;
+	_mali_osk_errcode_t err;
+	char name[32];
+
+	MALI_CHECK_NON_NULL(uargs, -EINVAL);
+
+	snprintf(name, 32, "mali-%u", _mali_osk_get_pid());
+
+	kargs.ctx = session_data;
+	err = mali_stream_create(name, &kargs.fd);
+	if (_MALI_OSK_ERR_OK != err)
+	{
+		return map_errcode(err);
+	}
+
+	kargs.ctx = NULL; /* prevent kernel address to be returned to user space */
+	if (0 != copy_to_user(uargs, &kargs, sizeof(_mali_uk_stream_create_s))) return -EFAULT;
+
+	return 0;
+}
+
+int sync_fence_validate_wrapper(struct mali_session_data *session, _mali_uk_fence_validate_s __user *uargs)
+{
+	int fd;
+	_mali_osk_errcode_t err;
+
+	if (0 != get_user(fd, &uargs->fd))
+	{
+		return -EFAULT;
+	}
+
+	err = mali_fence_validate(fd);
+
+	if (_MALI_OSK_ERR_OK == err)
+	{
+		return 0;
+	}
+
+	return -EINVAL;
+}
+#endif

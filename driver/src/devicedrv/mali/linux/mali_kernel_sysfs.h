@@ -20,13 +20,8 @@ extern "C"
 
 #define MALI_PROC_DIR "driver/mali"
 
-extern struct device *mali_device;
-struct mali_dev;
-
-int mali_sysfs_register(struct mali_dev *mali_class, dev_t dev, const char *mali_dev_name);
-
-int mali_sysfs_unregister(struct mali_dev *mali_class, dev_t dev, const char *mali_dev_name);
-
+int mali_sysfs_register(const char *mali_dev_name);
+int mali_sysfs_unregister(void);
 
 #ifdef __cplusplus
 }

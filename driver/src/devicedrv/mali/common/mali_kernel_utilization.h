@@ -13,6 +13,8 @@
 
 #include "mali_osk.h"
 
+extern void (*mali_utilization_callback)(unsigned int);
+
 /**
  * Initialize/start the Mali GPU utilization metrics reporting.
  *
@@ -24,6 +26,14 @@ _mali_osk_errcode_t mali_utilization_init(void);
  * Terminate the Mali GPU utilization metrics reporting
  */
 void mali_utilization_term(void);
+
+/**
+ * Check if Mali utilization is enabled
+ */
+MALI_STATIC_INLINE mali_bool mali_utilization_enabled(void)
+{
+	return (NULL != mali_utilization_callback);
+}
 
 /**
  * Should be called when a job is about to execute a job
@@ -39,6 +49,5 @@ void mali_utilization_suspend(void);
  * Should be called when a job has completed executing a job
  */
 void mali_utilization_core_end(u64 time_now);
-
 
 #endif /* __MALI_KERNEL_UTILIZATION_H__ */

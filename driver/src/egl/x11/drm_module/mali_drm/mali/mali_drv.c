@@ -9,6 +9,7 @@
  */
 
 #include <linux/vermagic.h>
+#include <linux/version.h>
 #include "drmP.h"
 #include "mali_drm.h"
 #include "mali_drv.h"
@@ -116,7 +117,11 @@ static struct drm_driver driver =
 		 .owner = THIS_MODULE,
 		 .open = drm_open,
 		 .release = drm_release,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,6,39)
 		 .ioctl = drm_ioctl,
+#else
+		 .unlocked_ioctl = drm_ioctl,
+#endif
 		 .mmap = drm_mmap,
 		 .poll = drm_poll,
 		 .fasync = drm_fasync,

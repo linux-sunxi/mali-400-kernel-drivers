@@ -12,7 +12,7 @@
 #include "mali_osk.h"
 #include "mali_ukk.h"
 
-#if MALI_TIMELINE_PROFILING_ENABLED
+#if defined(CONFIG_MALI400_PROFILING)
 #include "mali_osk_profiling.h"
 #endif
 
@@ -21,7 +21,7 @@ _mali_osk_errcode_t _mali_ukk_vsync_event_report(_mali_uk_vsync_event_report_s *
 	_mali_uk_vsync_event event = (_mali_uk_vsync_event)args->event;
 	MALI_IGNORE(event); /* event is not used for release code, and that is OK */
 
-#if MALI_TIMELINE_PROFILING_ENABLED
+#if defined(CONFIG_MALI400_PROFILING)
 	/*
 	 * Manually generate user space events in kernel space.
 	 * This saves user space from calling kernel space twice in this case.

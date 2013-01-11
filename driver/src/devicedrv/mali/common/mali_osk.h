@@ -63,6 +63,8 @@ extern "C"
 	#define MALI_FALSE ((mali_bool)0)
 #endif
 
+#define MALI_HW_CORE_NO_COUNTER     ((u32)-1)
+
 /**
  * @brief OSK Error codes
  *
@@ -92,6 +94,25 @@ typedef enum
 
 /** @} */ /* end group _mali_osk_miscellaneous */
 
+/** @defgroup _mali_osk_wq OSK work queues
+ * @{ */
+
+/** @brief Private type for work objects */
+typedef struct _mali_osk_wq_work_t_struct _mali_osk_wq_work_t;
+
+/** @brief Work queue handler function
+ *
+ * This function type is called when the work is scheduled by the work queue,
+ * e.g. as an IRQ bottom-half handler.
+ *
+ * Refer to \ref _mali_osk_wq_schedule_work() for more information on the
+ * work-queue and work handlers.
+ *
+ * @param arg resource-specific data
+ */
+typedef void (*_mali_osk_wq_work_handler_t)( void * arg );
+
+/* @} */ /* end group _mali_osk_wq */
 
 /** @defgroup _mali_osk_irq OSK IRQ handling
  * @{ */
@@ -127,7 +148,7 @@ typedef _mali_osk_errcode_t (*_mali_osk_irq_ack_t)( void * arg );
  *
  * If an IRQ upper-half handler requires more work to be done than can be
  * acheived in an IRQ context, then it may defer the work with
- * _mali_osk_irq_schedulework(). Refer to \ref _mali_osk_irq_schedulework() for
+ * _mali_osk_wq_schedule_work(). Refer to \ref _mali_osk_wq_create_work() for
  * more information.
  *
  * @param arg resource-specific data
@@ -136,24 +157,6 @@ typedef _mali_osk_errcode_t (*_mali_osk_irq_ack_t)( void * arg );
  */
 typedef _mali_osk_errcode_t  (*_mali_osk_irq_uhandler_t)( void * arg );
 
-/** @brief IRQ 'bottom-half' handler callback.
- *
- * This function is implemented by the common layer to do the deferred handling
- * of a resource's IRQ. Usually, this work cannot be carried out in IRQ context
- * by the IRQ upper-half handler.
- *
- * The IRQ bottom-half handler maps on to the concept of an IST that may
- * execute some time after the actual IRQ has fired.
- *
- * All OSK-registered IRQ bottom-half handlers will be serialized, across all
- * CPU-cores in the system.
- *
- * Refer to \ref _mali_osk_irq_schedulework() for more information on the
- * IRQ work-queue, and the calling of the IRQ bottom-half handler.
- *
- * @param arg resource-specific data
- */
-typedef void (*_mali_osk_irq_bhandler_t)( void * arg );
 /** @} */ /* end group _mali_osk_irq */
 
 
@@ -197,20 +200,21 @@ typedef enum
 {
 	_MALI_OSK_LOCK_ORDER_LAST = 0,
 
+	_MALI_OSK_LOCK_ORDER_SESSION_PENDING_JOBS,
 	_MALI_OSK_LOCK_ORDER_PM_EXECUTE,
 	_MALI_OSK_LOCK_ORDER_UTILIZATION,
 	_MALI_OSK_LOCK_ORDER_L2_COUNTER,
 	_MALI_OSK_LOCK_ORDER_PROFILING,
 	_MALI_OSK_LOCK_ORDER_L2_COMMAND,
 	_MALI_OSK_LOCK_ORDER_PM_CORE_STATE,
-	_MALI_OSK_LOCK_ORDER_GROUP,
+	_MALI_OSK_LOCK_ORDER_SCHEDULER_DEFERRED,
 	_MALI_OSK_LOCK_ORDER_SCHEDULER,
-
+	_MALI_OSK_LOCK_ORDER_GROUP,
+	_MALI_OSK_LOCK_ORDER_GROUP_VIRTUAL,
 	_MALI_OSK_LOCK_ORDER_DESCRIPTOR_MAP,
 	_MALI_OSK_LOCK_ORDER_MEM_PT_CACHE,
 	_MALI_OSK_LOCK_ORDER_MEM_INFO,
 	_MALI_OSK_LOCK_ORDER_MEM_SESSION,
-
 	_MALI_OSK_LOCK_ORDER_SESSIONS,
 
 	_MALI_OSK_LOCK_ORDER_FIRST
@@ -311,6 +315,8 @@ typedef struct _mali_osk_lock_t_struct _mali_osk_lock_t;
 /** @brief returns a lock's owner (thread id) if debugging is enabled
  */
 u32 _mali_osk_lock_get_owner( _mali_osk_lock_t *lock );
+#else
+#define MALI_DEBUG_ASSERT_LOCK_HELD(l) do {} while(0)
 #endif
 
 /** @} */ /* end group _mali_osk_lock */
@@ -429,7 +435,7 @@ typedef struct _mali_osk_notification_t_struct
  *
  * If a timer requires more work to be done than can be acheived in an IRQ
  * context, then it may defer the work with a work-queue. For example, it may
- * use \ref _mali_osk_irq_schedulework() to make use of the IRQ bottom-half handler
+ * use \ref _mali_osk_wq_schedule_work() to make use of a bottom-half handler
  * to carry out the remaining work.
  *
  * Stopping the timer with \ref _mali_osk_timer_del() blocks on compeletion of
@@ -472,6 +478,10 @@ typedef struct _mali_osk_list_s
 /** @brief Define a list variable, which is uninitialized.
  * @param exp the name of the variable that the list will be defined as. */
 #define _MALI_OSK_LIST_HEAD(exp)      _mali_osk_list_t exp
+
+/** @brief Define a list variable, which is initialized.
+ * @param exp the name of the variable that the list will be defined as. */
+#define _MALI_OSK_LIST_HEAD_STATIC_INIT(exp) _mali_osk_list_t exp = { &exp, &exp }
 
 /** @brief Find the containing structure of another structure
  *
@@ -557,131 +567,61 @@ typedef struct _mali_osk_list_s
 /** @addtogroup _mali_osk_miscellaneous
  * @{ */
 
-/** @brief The known resource types
- *
- * @note \b IMPORTANT: these must remain fixed, and only be extended. This is
- * because not all systems use a header file for reading in their resources.
- * The resources may instead come from a data file where these resources are
- * 'hard-coded' in, because there's no easy way of transferring the enum values
- * into such data files. E.g. the C-Pre-processor does \em not process enums.
- */
-typedef enum _mali_osk_resource_type
-{
-	RESOURCE_TYPE_FIRST =0,  /**< Duplicate resource marker for the first resource*/
-
-	MEMORY              =0,  /**< Physically contiguous memory block, not managed by the OS */
-	OS_MEMORY           =1,  /**< Memory managed by and shared with the OS */
-
-	MALI_PP             =2,  /**< Mali Pixel Processor core */
-	MALI450PP           =2,  /**< Compatibility option */
-	MALI400PP           =2,  /**< Compatibility option */
-	MALI300PP           =2,  /**< Compatibility option */
-	MALI200             =2,  /**< Compatibility option */
-	
-	MALI_GP             =3,  /**< Mali Geometry Processor core */
-	MALI450GP           =3,  /**< Compatibility option */
-	MALI400GP           =3,  /**< Compatibility option */
-	MALI300GP           =3,  /**< Compatibility option */
-	MALIGP2             =3,  /**< Compatibility option */
-
-	MMU                 =4,  /**< Mali MMU (Memory Management Unit) */
-
-	FPGA_FRAMEWORK      =5,  /**< Mali registers specific to FPGA implementations */
-
-	MALI_L2             =6,  /**< Mali Level 2 cache core */
-	MALI450L2           =6,  /**< Compatibility option */
-	MALI400L2           =6,  /**< Compatibility option */
-	MALI300L2           =6,  /**< Compatibility option */
-
-	MEM_VALIDATION      =7, /**< External Memory Validator */
-
-	PMU                 =8, /**< Power Manangement Unit */
-
-	RESOURCE_TYPE_COUNT      /**< The total number of known resources */
-} _mali_osk_resource_type_t;
-
 /** @brief resource description struct
  *
- * _mali_osk_resources_init() will enumerate objects of this type. Not all
- * members have a valid meaning across all types.
- *
- * The mmu_id is used to group resources to a certain MMU, since there may be
- * more than one MMU in the system, and each resource may be using a different
- * MMU:
- * - For MMU resources, the setting of mmu_id is a uniquely identifying number.
- * - For Other resources, the setting of mmu_id determines which MMU the
- * resource uses.
+ * Platform independent representation of a Mali HW resource
  */
 typedef struct _mali_osk_resource
 {
-	_mali_osk_resource_type_t type; /**< type of the resource */
 	const char * description;       /**< short description of the resource */
 	u32 base;                       /**< Physical base address of the resource, as seen by Mali resources. */
-	s32 cpu_usage_adjust;           /**< Offset added to the base address of the resource to arrive at the CPU physical address of the resource (if different from the Mali physical address) */
-	u32 size;                       /**< Size in bytes of the resource - either the size of its register range, or the size of the memory block. */
 	u32 irq;                        /**< IRQ number delivered to the CPU, or -1 to tell the driver to probe for it (if possible) */
-	u32 flags;                      /**< Resources-specific flags. */
-	u32 mmu_id;                     /**< Identifier for Mali MMU resources. */
-	u32 alloc_order;                /**< Order in which MEMORY/OS_MEMORY resources are used */
 } _mali_osk_resource_t;
 /** @} */ /* end group _mali_osk_miscellaneous */
 
 
 #include "mali_kernel_memory_engine.h"   /* include for mali_memory_allocation and mali_physical_memory_allocation type */
 
-/** @addtogroup _mali_osk_irq
+/** @addtogroup _mali_osk_wq
  * @{ */
 
-/** @brief Fake IRQ number for testing purposes
+/** @brief Initialize work queues (for deferred work)
+ *
+ * @return _MALI_OSK_ERR_OK on success, otherwise failure.
  */
-#define _MALI_OSK_IRQ_NUMBER_FAKE ((u32)0xFFFFFFF1)
+_mali_osk_errcode_t _mali_osk_wq_init(void);
 
-/** @addtogroup _mali_osk_irq
- * @{ */
-
-/** @brief PMM Virtual IRQ number
+/** @brief Terminate work queues (for deferred work)
  */
-#define _MALI_OSK_IRQ_NUMBER_PMM ((u32)0xFFFFFFF2)
+void _mali_osk_wq_term(void);
 
-
-/** @brief Initialize IRQ handling for a resource
+/** @brief Create work in the work queue
  *
- * The _mali_osk_irq_t returned must be written into the resource-specific data
- * pointed to by data. This is so that the upper and lower handlers can call
- * _mali_osk_irq_schedulework().
+ * Creates a work object which can be scheduled in the work queue. When
+ * scheduled, \a handler will be called with \a data as the argument.
  *
- * @note The caller must ensure that the resource does not generate an
- * interrupt after _mali_osk_irq_init() finishes, and before the
- * _mali_osk_irq_t is written into the resource-specific data. Otherwise,
- * the upper-half handler will fail to call _mali_osk_irq_schedulework().
+ * Refer to \ref _mali_osk_wq_schedule_work() for details on how work
+ * is scheduled in the queue.
  *
- * @param irqnum The IRQ number that the resource uses, as seen by the CPU.
- * The value -1 has a special meaning which indicates the use of probing, and trigger_func and ack_func must be
- * non-NULL.
- * @param uhandler The upper-half handler, corresponding to a ISR handler for
- * the resource
- * @param bhandler The lower-half handler, corresponding to an IST handler for
- * the resource
- * @param trigger_func Optional: a function to trigger the resource's irq, to
- * probe for the interrupt. Use NULL if irqnum != -1.
- * @param ack_func Optional: a function to acknowledge the resource's irq, to
- * probe for the interrupt. Use NULL if irqnum != -1.
- * @param data resource-specific data, which will be passed to uhandler,
- * bhandler and (if present) trigger_func and ack_funnc
- * @param description textual description of the IRQ resource.
- * @return on success, a pointer to a _mali_osk_irq_t object, which represents
- * the IRQ handling on this resource. NULL on failure.
+ * The returned pointer must be freed with \ref _mali_osk_wq_delete_work()
+ * when no longer needed.
  */
-_mali_osk_irq_t *_mali_osk_irq_init( u32 irqnum, _mali_osk_irq_uhandler_t uhandler,	_mali_osk_irq_bhandler_t bhandler, _mali_osk_irq_trigger_t trigger_func, _mali_osk_irq_ack_t ack_func, void *data, const char *description );
+_mali_osk_wq_work_t *_mali_osk_wq_create_work( _mali_osk_wq_work_handler_t handler, void *data );
 
-/** @brief Cause a queued, deferred call of the IRQ bottom-half.
+/** @brief Delete a work object
  *
- * _mali_osk_irq_schedulework provides a mechanism for enqueuing deferred calls
- * to the IRQ bottom-half handler. The queue is known as the IRQ work-queue.
- * After calling _mali_osk_irq_schedulework(), the IRQ bottom-half handler will
- * be scheduled to run at some point in the future.
+ * This will flush the work queue to ensure that the work handler will not
+ * be called after deletion.
+ */
+void _mali_osk_wq_delete_work( _mali_osk_wq_work_t *work );
+
+/** @brief Cause a queued, deferred call of the work handler
  *
- * This is called by the IRQ upper-half to defer further processing of
+ * _mali_osk_wq_schedule_work provides a mechanism for enqueuing deferred calls
+ * to the work handler. After calling \ref _mali_osk_wq_schedule_work(), the
+ * work handler will be scheduled to run at some point in the future.
+ *
+ * Typically this is called by the IRQ upper-half to defer further processing of
  * IRQ-related work to the IRQ bottom-half handler. This is necessary for work
  * that cannot be done in an IRQ context by the IRQ upper-half handler. Timer
  * callbacks also use this mechanism, because they are treated as though they
@@ -694,78 +634,97 @@ _mali_osk_irq_t *_mali_osk_irq_init( u32 irqnum, _mali_osk_irq_uhandler_t uhandl
  * IRQ bottom half to hold the same mutex, with a guarantee that they will not
  * deadlock just by using this mechanism.
  *
- * _mali_osk_irq_schedulework() places deferred call requests on a queue, to
+ * _mali_osk_wq_schedule_work() places deferred call requests on a queue, to
  * allow for more than one thread to make a deferred call. Therfore, if it is
  * called 'K' times, then the IRQ bottom-half will be scheduled 'K' times too.
  * 'K' is a number that is implementation-specific.
  *
- * _mali_osk_irq_schedulework() is guaranteed to not block on:
+ * _mali_osk_wq_schedule_work() is guaranteed to not block on:
  * - enqueuing a deferred call request.
- * - the completion of the IRQ bottom-half handler.
+ * - the completion of the work handler.
  *
- * This is to prevent deadlock. For example, if _mali_osk_irq_schedulework()
+ * This is to prevent deadlock. For example, if _mali_osk_wq_schedule_work()
  * blocked, then it would cause a deadlock when the following two conditions
  * hold:
- * - The IRQ bottom-half callback (of type _mali_osk_irq_bhandler_t) locks
+ * - The work handler callback (of type _mali_osk_wq_work_handler_t) locks
  * a mutex
- * - And, at the same time, the caller of _mali_osk_irq_schedulework() also
+ * - And, at the same time, the caller of _mali_osk_wq_schedule_work() also
  * holds the same mutex
  *
  * @note care must be taken to not overflow the queue that
- * _mali_osk_irq_schedulework() operates on. Code must be structured to
+ * _mali_osk_wq_schedule_work() operates on. Code must be structured to
  * ensure that the number of requests made to the queue is bounded. Otherwise,
- * IRQs will be lost.
+ * work will be lost.
  *
- * The queue that _mali_osk_irq_schedulework implements is a FIFO of N-writer,
- * 1-reader type. The writers are the callers of _mali_osk_irq_schedulework
+ * The queue that _mali_osk_wq_schedule_work implements is a FIFO of N-writer,
+ * 1-reader type. The writers are the callers of _mali_osk_wq_schedule_work
  * (all OSK-registered IRQ upper-half handlers in the system, watchdog timers,
  * callers from a Kernel-process context). The reader is a single thread that
- * handles all OSK-registered IRQs.
+ * handles all OSK-registered work.
  *
- * The consequence of the queue being a 1-reader type is that calling
- * _mali_osk_irq_schedulework() on different _mali_osk_irq_t objects causes
- * their IRQ bottom-halves to be serialized, across all CPU-cores in the
- * system.
- *
- * @param irq a pointer to the _mali_osk_irq_t object corresponding to the
- * resource whose IRQ bottom-half must begin processing.
+ * @param work a pointer to the _mali_osk_wq_work_t object corresponding to the
+ * work to begin processing.
  */
-void _mali_osk_irq_schedulework( _mali_osk_irq_t *irq );
+void _mali_osk_wq_schedule_work( _mali_osk_wq_work_t *work );
+
+/** @brief Flush the work queue
+ *
+ * This will flush the OSK work queue, ensuring all work in the queue has
+ * completed before returning.
+ *
+ * Since this blocks on the completion of work in the work-queue, the
+ * caller of this function \b must \b not hold any mutexes that are taken by
+ * any registered work handler. To do so may cause a deadlock.
+ *
+ */
+void _mali_osk_wq_flush(void);
+
+
+/** @} */ /* end group _mali_osk_wq */
+
+/** @addtogroup _mali_osk_irq
+ * @{ */
+
+/** @brief Initialize IRQ handling for a resource
+ *
+ * Registers an interrupt handler \a uhandler for the given IRQ number \a irqnum.
+ * \a data will be passed as argument to the handler when an interrupt occurs.
+ *
+ * If \a irqnum is -1, _mali_osk_irq_init will probe for the IRQ number using
+ * the supplied \a trigger_func and \a ack_func. These functions will also
+ * receive \a data as their argument.
+ *
+ * @param irqnum The IRQ number that the resource uses, as seen by the CPU.
+ * The value -1 has a special meaning which indicates the use of probing, and
+ * trigger_func and ack_func must be non-NULL.
+ * @param uhandler The interrupt handler, corresponding to a ISR handler for
+ * the resource
+ * @param int_data resource specific data, which will be passed to uhandler
+ * @param trigger_func Optional: a function to trigger the resource's irq, to
+ * probe for the interrupt. Use NULL if irqnum != -1.
+ * @param ack_func Optional: a function to acknowledge the resource's irq, to
+ * probe for the interrupt. Use NULL if irqnum != -1.
+ * @param probe_data resource-specific data, which will be passed to
+ * (if present) trigger_func and ack_func
+ * @param description textual description of the IRQ resource.
+ * @return on success, a pointer to a _mali_osk_irq_t object, which represents
+ * the IRQ handling on this resource. NULL on failure.
+ */
+_mali_osk_irq_t *_mali_osk_irq_init( u32 irqnum, _mali_osk_irq_uhandler_t uhandler, void *int_data, _mali_osk_irq_trigger_t trigger_func, _mali_osk_irq_ack_t ack_func, void *probe_data, const char *description );
 
 /** @brief Terminate IRQ handling on a resource.
  *
- * This will disable the interrupt from the device, and then waits for the
- * IRQ work-queue to finish the work that is currently in the queue. That is,
- * for every deferred call currently in the IRQ work-queue, it waits for each
- * of those to be processed by their respective IRQ bottom-half handler.
+ * This will disable the interrupt from the device, and then waits for any
+ * currently executing IRQ handlers to complete.
  *
- * This function is used to ensure that the bottom-half handler of the supplied
- * IRQ object will not be running at the completion of this function call.
- * However, the caller must ensure that no other sources could call the
- * _mali_osk_irq_schedulework() on the same IRQ object. For example, the
- * relevant timers must be stopped.
- *
- * @note While this function is being called, other OSK-registered IRQs in the
- * system may enqueue work for their respective bottom-half handlers. This
- * function will not wait for those entries in the work-queue to be flushed.
- *
- * Since this blocks on the completion of work in the IRQ work-queue, the
- * caller of this function \b must \b not hold any mutexes that are taken by
- * any OSK-registered IRQ bottom-half handler. To do so may cause a deadlock.
+ * @note If work is deferred to an IRQ bottom-half handler through
+ * \ref _mali_osk_wq_schedule_work(), be sure to flush any remaining work
+ * with \ref _mali_osk_wq_flush() or (implicitly) with \ref _mali_osk_wq_delete_work()
  *
  * @param irq a pointer to the _mali_osk_irq_t object corresponding to the
  * resource whose IRQ handling is to be terminated.
  */
 void _mali_osk_irq_term( _mali_osk_irq_t *irq );
-
-/** @brief flushing workqueue.
- *
- * This will flush the workqueue.
- *
- * @param irq a pointer to the _mali_osk_irq_t object corresponding to the
- * resource whose IRQ handling is to be terminated.
- */
-void _mali_osk_flush_workqueue( _mali_osk_irq_t *irq );
 
 /** @} */ /* end group _mali_osk_irq */
 
@@ -1493,23 +1452,22 @@ void _mali_osk_timer_add( _mali_osk_timer_t *tim, u32 ticks_to_expire );
 
 /** @brief Modify a timer
  *
- * Set the absolute time at which a timer will expire, and start it if it is
- * stopped. If \a expiry_tick is in the past (determined by
- * _mali_osk_time_after() ), the timer fires immediately.
+ * Set the relative time at which a timer will expire, and start it if it is
+ * stopped. If \a ticks_to_expire 0 the timer fires immediately.
  *
  * It is an error to modify a timer without setting the callback via
  *  _mali_osk_timer_setcallback().
  *
- * The timer will expire at absolute time \a expiry_tick, at which point, the
- * callback function will be invoked with the callback-specific data, as set
- * by _mali_osk_timer_setcallback().
+ * The timer will expire at \a ticks_to_expire from the time of the call, at
+ * which point, the callback function will be invoked with the
+ * callback-specific data, as set by _mali_osk_timer_setcallback().
  *
  * @param tim the timer to modify, and start if necessary
- * @param expiry_tick the \em absolute time in ticks at which this timer should
- * trigger.
+ * @param ticks_to_expire the \em absolute time in ticks at which this timer
+ * should trigger.
  *
  */
-void _mali_osk_timer_mod( _mali_osk_timer_t *tim, u32 expiry_tick);
+void _mali_osk_timer_mod( _mali_osk_timer_t *tim, u32 ticks_to_expire);
 
 /** @brief Stop a timer, and block on its completion.
  *
@@ -1521,9 +1479,9 @@ void _mali_osk_timer_mod( _mali_osk_timer_t *tim, u32 expiry_tick);
  * occur.
  *
  * @note While the callback itself is guaranteed to not be running, work
- * enqueued on the IRQ work-queue by the timer (with
- * \ref _mali_osk_irq_schedulework()) may still run. The timer callback and IRQ
- * bottom-half handler must take this into account.
+ * enqueued on the work-queue by the timer (with
+ * \ref _mali_osk_wq_schedule_work()) may still run. The timer callback and
+ * work handler must take this into account.
  *
  * It is legal to stop an already stopped timer.
  *
@@ -1531,6 +1489,26 @@ void _mali_osk_timer_mod( _mali_osk_timer_t *tim, u32 expiry_tick);
  *
  */
 void _mali_osk_timer_del( _mali_osk_timer_t *tim );
+
+/** @brief Stop a timer.
+ *
+ * Stop the timer. When the function returns, the timer's callback may still be
+ * running on any CPU core.
+ *
+ * It is legal to stop an already stopped timer.
+ *
+ * @param tim the timer to stop.
+ */
+void _mali_osk_timer_del_async( _mali_osk_timer_t *tim );
+
+/** @brief Check if timer is pending.
+ *
+ * Check if timer is active.
+ *
+ * @param tim the timer to check
+ * @return MALI_TRUE if time is active, MALI_FALSE if it is not active
+ */
+mali_bool _mali_osk_timer_pending( _mali_osk_timer_t *tim);
 
 /** @brief Set a timer's callback parameters.
  *
@@ -1754,20 +1732,53 @@ u32 _mali_osk_get_tid(void);
  */
 void _mali_osk_pm_dev_enable(void);
 
-/** @brief Tells the OS that device is now idle
+/** @brief Disable OS controlled runtime power management
  */
-_mali_osk_errcode_t _mali_osk_pm_dev_idle(void);
+void _mali_osk_pm_dev_disable(void);
 
-/** @brief Tells the OS that the device is about to become active
+
+/** @brief Take a reference to the power manager system for the Mali device.
+ *
+ * When function returns successfully, Mali is ON.
+ *
+ * @note Call \a _mali_osk_pm_dev_ref_dec() to release this reference.
  */
-_mali_osk_errcode_t _mali_osk_pm_dev_activate(void);
+_mali_osk_errcode_t _mali_osk_pm_dev_ref_add(void);
+
+
+/** @brief Release the reference to the power manger system for the Mali device.
+ *
+ * When reference count reach zero, the cores can be off.
+ *
+ * @note This must be used to release references taken with \a _mali_osk_pm_dev_ref_add().
+ */
+void _mali_osk_pm_dev_ref_dec(void);
+
+
+/** @brief Take a reference to the power manager system for the Mali device.
+ *
+ * Will leave the cores powered off if they are already powered off.
+ *
+ * @note Call \a _mali_osk_pm_dev_ref_dec() to release this reference.
+ *
+ * @return MALI_TRUE if the Mali GPU is powered on, otherwise MALI_FALSE.
+ */
+mali_bool _mali_osk_pm_dev_ref_add_no_power_on(void);
+
+
+/** @brief Releasing the reference to the power manger system for the Mali device.
+ *
+ * When reference count reach zero, the cores can be off.
+ *
+ * @note This must be used to release references taken with \a _mali_osk_pm_dev_ref_add_no_power_on().
+ */
+void _mali_osk_pm_dev_ref_dec_no_power_on(void);
 
 /** @} */ /* end group  _mali_osk_miscellaneous */
 
 /** @} */ /* end group osuapi */
 
 /** @} */ /* end group uddapi */
-
 
 #ifdef __cplusplus
 }

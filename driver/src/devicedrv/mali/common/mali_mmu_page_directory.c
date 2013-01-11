@@ -14,8 +14,7 @@
 #include "mali_uk_types.h"
 #include "mali_mmu_page_directory.h"
 #include "mali_memory.h"
-
-#include "mali_cluster.h"
+#include "mali_l2_cache.h"
 #include "mali_group.h"
 
 static _mali_osk_errcode_t fill_page(mali_io_address mapping, u32 data);
@@ -245,7 +244,7 @@ _mali_osk_errcode_t mali_mmu_pagedir_unmap(struct mali_page_directory *pagedir, 
 
 	if (_MALI_PRODUCT_ID_MALI200 != mali_kernel_core_get_product_id())
 	{
-		mali_cluster_invalidate_pages(pages_to_invalidate, num_pages_inv);
+		mali_l2_cache_invalidate_pages_conditional(pages_to_invalidate, num_pages_inv);
 	}
 #endif
 
@@ -305,12 +304,12 @@ void mali_mmu_pagedir_update(struct mali_page_directory *pagedir, u32 mali_addre
 	switch ( cache_settings )
 	{
 		case MALI_CACHE_GP_READ_ALLOCATE:
-		MALI_DEBUG_PRINT(3, ("Map L2 GP_Read_allocate\n"));
+		MALI_DEBUG_PRINT(5, ("Map L2 GP_Read_allocate\n"));
 		permission_bits = MALI_MMU_FLAGS_FORCE_GP_READ_ALLOCATE;
 		break;
 
 		case MALI_CACHE_STANDARD:
-		MALI_DEBUG_PRINT(3, ("Map L2 Standard\n"));
+		MALI_DEBUG_PRINT(5, ("Map L2 Standard\n"));
 		/*falltrough */
 		default:
 		if ( MALI_CACHE_STANDARD != cache_settings) MALI_PRINT_ERROR(("Wrong cache settings\n"));

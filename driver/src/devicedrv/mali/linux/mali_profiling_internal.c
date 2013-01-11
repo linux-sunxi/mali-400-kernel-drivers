@@ -52,7 +52,7 @@ _mali_osk_errcode_t _mali_internal_profiling_init(mali_bool auto_start)
 	profile_mask = 0;
 	_mali_osk_atomic_init(&profile_insert_index, 0);
 
-	lock = _mali_osk_lock_init(_MALI_OSK_LOCKFLAG_ORDERED | _MALI_OSK_LOCKFLAG_SPINLOCK | _MALI_OSK_LOCKFLAG_NONINTERRUPTABLE, 0, _MALI_OSK_LOCK_ORDER_PROFILING);
+	lock = _mali_osk_lock_init(_MALI_OSK_LOCKFLAG_ORDERED | _MALI_OSK_LOCKFLAG_NONINTERRUPTABLE, 0, _MALI_OSK_LOCK_ORDER_PROFILING);
 	if (NULL == lock)
 	{
 		return _MALI_OSK_ERR_FAULT;
@@ -99,10 +99,23 @@ void _mali_internal_profiling_term(void)
 _mali_osk_errcode_t _mali_internal_profiling_start(u32 * limit)
 {
 	_mali_osk_errcode_t ret;
-
 	mali_profiling_entry *new_profile_entries;
 
 	_mali_osk_lock_wait(lock, _MALI_OSK_LOCKMODE_RW);
+
+	if (MALI_PROFILING_STATE_RUNNING == prof_state)
+	{
+		_mali_osk_lock_signal(lock, _MALI_OSK_LOCKMODE_RW);
+		return _MALI_OSK_ERR_BUSY;
+	}
+
+	new_profile_entries = _mali_osk_valloc(*limit * sizeof(mali_profiling_entry));
+
+	if (NULL == new_profile_entries)
+	{
+		_mali_osk_vfree(new_profile_entries);
+		return _MALI_OSK_ERR_NOMEM;
+	}
 
 	if (MALI_PROFILING_MAX_BUFFER_ENTRIES < *limit)
 	{
@@ -119,14 +132,6 @@ _mali_osk_errcode_t _mali_internal_profiling_start(u32 * limit)
 	*limit = profile_mask;
 
 	profile_mask--; /* turns the power of two into a mask of one less */
-
-	new_profile_entries = _mali_osk_valloc(*limit * sizeof(mali_profiling_entry));
-
-	if (NULL == new_profile_entries)
-	{
-		_mali_osk_lock_signal(lock, _MALI_OSK_LOCKMODE_RW);
-		return _MALI_OSK_ERR_NOMEM;
-	}
 
 	if (MALI_PROFILING_STATE_IDLE != prof_state)
 	{
@@ -190,9 +195,10 @@ _mali_osk_errcode_t _mali_internal_profiling_stop(u32 * count)
 	prof_state = MALI_PROFILING_STATE_RETURN;
 
 	unregister_trace_mali_timeline_event(probe_mali_timeline_event, NULL);
-	tracepoint_synchronize_unregister();
 
 	_mali_osk_lock_signal(lock, _MALI_OSK_LOCKMODE_RW);
+
+	tracepoint_synchronize_unregister();
 
 	*count = _mali_osk_atomic_read(&profile_insert_index);
 	if (*count > profile_mask) *count = profile_mask;

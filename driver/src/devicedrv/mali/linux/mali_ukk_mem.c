@@ -127,7 +127,7 @@ int mem_unmap_ext_wrapper(struct mali_session_data *session_data, _mali_uk_unmap
 	return map_errcode(err_code);
 }
 
-#if MALI_USE_UNIFIED_MEMORY_PROVIDER != 0
+#if defined(CONFIG_MALI400_UMP)
 int mem_release_ump_wrapper(struct mali_session_data *session_data, _mali_uk_release_ump_mem_s __user * argument)
 {
 	_mali_uk_release_ump_mem_s uk_args;
@@ -189,7 +189,7 @@ int mem_attach_ump_wrapper(struct mali_session_data *session_data, _mali_uk_atta
     /* Return the error that _mali_ukk_map_external_ump_mem produced */
 	return map_errcode(err_code);
 }
-#endif /* MALI_USE_UNIFIED_MEMORY_PROVIDER */
+#endif /* CONFIG_MALI400_UMP */
 
 int mem_query_mmu_page_table_dump_size_wrapper(struct mali_session_data *session_data, _mali_uk_query_mmu_page_table_dump_size_s __user * uargs)
 {

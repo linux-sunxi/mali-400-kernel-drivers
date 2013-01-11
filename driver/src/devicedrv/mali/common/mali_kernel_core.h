@@ -28,8 +28,6 @@ _mali_osk_errcode_t mali_initialize_subsystems(void);
 
 void mali_terminate_subsystems(void);
 
-void mali_kernel_core_wakeup(void);
-
 _mali_product_id_t mali_kernel_core_get_product_id(void);
 
 u32 _mali_kernel_core_dump_state(char* buf, u32 size);

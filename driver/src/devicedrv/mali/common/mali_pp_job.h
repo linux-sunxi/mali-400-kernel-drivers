@@ -17,38 +17,48 @@
 #include "mali_session.h"
 #include "mali_kernel_common.h"
 #include "regs/mali_200_regs.h"
+#include "mali_kernel_core.h"
+#ifdef CONFIG_SYNC
+#include <linux/sync.h>
+#endif
+#include "mali_dlbu.h"
 
 /**
- * The structure represends a PP job, including all sub-jobs
- * (This struct unfortunatly needs to be public because of how the _mali_osk_list_*
+ * The structure represents a PP job, including all sub-jobs
+ * (This struct unfortunately needs to be public because of how the _mali_osk_list_*
  * mechanism works)
  */
 struct mali_pp_job
 {
 	_mali_osk_list_t list;                             /**< Used to link jobs together in the scheduler queue */
 	struct mali_session_data *session;                 /**< Session which submitted this job */
+	_mali_osk_list_t session_list;                     /**< Used to link jobs together in the session job list */
 	_mali_uk_pp_start_job_s uargs;                     /**< Arguments from user space */
-	u32 id;                                            /**< identifier for this job in kernel space (sequencial numbering) */
+	u32 id;                                            /**< Identifier for this job in kernel space (sequential numbering) */
 	u32 perf_counter_value0[_MALI_PP_MAX_SUB_JOBS];    /**< Value of performance counter 0 (to be returned to user space), one for each sub job */
 	u32 perf_counter_value1[_MALI_PP_MAX_SUB_JOBS];    /**< Value of performance counter 1 (to be returned to user space), one for each sub job */
+	u32 sub_jobs_num;                                  /**< Number of subjobs; set to 1 for Mali-450 if DLBU is used, otherwise equals number of PP cores */
 	u32 sub_jobs_started;                              /**< Total number of sub-jobs started (always started in ascending order) */
 	u32 sub_jobs_completed;                            /**< Number of completed sub-jobs in this superjob */
 	u32 sub_job_errors;                                /**< Bitfield with errors (errors for each single sub-job is or'ed together) */
 	u32 pid;                                           /**< Process ID of submitting process */
 	u32 tid;                                           /**< Thread ID of submitting thread */
+	_mali_osk_notification_t *finished_notification;   /**< Notification sent back to userspace on job complete */
+#ifdef CONFIG_SYNC
+	mali_sync_pt *sync_point;                          /**< Sync point to signal on completion */
+	struct sync_fence_waiter sync_waiter;              /**< Sync waiter for async wait */
+	_mali_osk_wq_work_t *sync_work;                    /**< Work to schedule in callback */
+	struct sync_fence *pre_fence;                      /**< Sync fence this job must wait for */
+#endif
 };
 
 struct mali_pp_job *mali_pp_job_create(struct mali_session_data *session, _mali_uk_pp_start_job_s *uargs, u32 id);
 void mali_pp_job_delete(struct mali_pp_job *job);
 
-MALI_STATIC_INLINE _mali_osk_errcode_t mali_pp_job_check(struct mali_pp_job *job)
-{
-	if ((0 == job->uargs.frame_registers[0]) || (0 == job->uargs.frame_registers[1]))
-	{
-		return _MALI_OSK_ERR_FAULT;
-	}
-	return _MALI_OSK_ERR_OK;
-}
+u32 mali_pp_job_get_pp_counter_src0(void);
+mali_bool mali_pp_job_set_pp_counter_src0(u32 counter);
+u32 mali_pp_job_get_pp_counter_src1(void);
+mali_bool mali_pp_job_set_pp_counter_src1(u32 counter);
 
 MALI_STATIC_INLINE u32 mali_pp_job_get_id(struct mali_pp_job *job)
 {
@@ -85,9 +95,23 @@ MALI_STATIC_INLINE u32* mali_pp_job_get_frame_registers(struct mali_pp_job *job)
 	return job->uargs.frame_registers;
 }
 
+MALI_STATIC_INLINE u32* mali_pp_job_get_dlbu_registers(struct mali_pp_job *job)
+{
+	return job->uargs.dlbu_registers;
+}
+
+MALI_STATIC_INLINE mali_bool mali_pp_job_is_virtual(struct mali_pp_job *job)
+{
+	return 0 == job->uargs.num_cores;
+}
+
 MALI_STATIC_INLINE u32 mali_pp_job_get_addr_frame(struct mali_pp_job *job, u32 sub_job)
 {
-	if (sub_job == 0)
+	if (mali_pp_job_is_virtual(job))
+	{
+		return MALI_DLBU_VIRT_ADDR;
+	}
+	else if (0 == sub_job)
 	{
 		return job->uargs.frame_registers[MALI200_REG_ADDR_FRAME / sizeof(u32)];
 	}
@@ -101,7 +125,7 @@ MALI_STATIC_INLINE u32 mali_pp_job_get_addr_frame(struct mali_pp_job *job, u32 s
 
 MALI_STATIC_INLINE u32 mali_pp_job_get_addr_stack(struct mali_pp_job *job, u32 sub_job)
 {
-	if (sub_job == 0)
+	if (0 == sub_job)
 	{
 		return job->uargs.frame_registers[MALI200_REG_ADDR_STACK / sizeof(u32)];
 	}
@@ -150,37 +174,22 @@ MALI_STATIC_INLINE struct mali_session_data *mali_pp_job_get_session(struct mali
 
 MALI_STATIC_INLINE mali_bool mali_pp_job_has_unstarted_sub_jobs(struct mali_pp_job *job)
 {
-	return (job->sub_jobs_started < job->uargs.num_cores) ? MALI_TRUE : MALI_FALSE;
+	return (job->sub_jobs_started < job->sub_jobs_num) ? MALI_TRUE : MALI_FALSE;
 }
 
 /* Function used when we are terminating a session with jobs. Return TRUE if it has a rendering job.
-   Makes sure that no new subjobs is started. */
-MALI_STATIC_INLINE mali_bool mali_pp_job_is_currently_rendering_and_if_so_abort_new_starts(struct mali_pp_job *job)
+   Makes sure that no new subjobs are started. */
+MALI_STATIC_INLINE void mali_pp_job_mark_unstarted_failed(struct mali_pp_job *job)
 {
-	/* All can not be started, since then it would not be in the job queue */
-	MALI_DEBUG_ASSERT( job->sub_jobs_started != job->uargs.num_cores );
-
-	/* If at least one job is started */
-	if (  (job->sub_jobs_started > 0)  )
-	{
-		/* If at least one job is currently being rendered, and thus assigned to a group and core */
-		if (job->sub_jobs_started > job->sub_jobs_completed )
-		{
-			u32 jobs_remaining = job->uargs.num_cores - job->sub_jobs_started;
-			job->sub_jobs_started   += jobs_remaining;
-			job->sub_jobs_completed += jobs_remaining;
-			job->sub_job_errors     += jobs_remaining;
-			/* Returning TRUE indicating that we can not delete this job which is being redered */
-			return MALI_TRUE;
-		}
-	}
-	/* The job is not being rendered to at the moment and can then safely be deleted */
-	return MALI_FALSE;
+	u32 jobs_remaining = job->sub_jobs_num - job->sub_jobs_started;
+	job->sub_jobs_started   += jobs_remaining;
+	job->sub_jobs_completed += jobs_remaining;
+	job->sub_job_errors     += jobs_remaining;
 }
 
 MALI_STATIC_INLINE mali_bool mali_pp_job_is_complete(struct mali_pp_job *job)
 {
-	return (job->uargs.num_cores == job->sub_jobs_completed) ? MALI_TRUE : MALI_FALSE;
+	return (job->sub_jobs_num == job->sub_jobs_completed) ? MALI_TRUE : MALI_FALSE;
 }
 
 MALI_STATIC_INLINE u32 mali_pp_job_get_first_unstarted_sub_job(struct mali_pp_job *job)
@@ -190,7 +199,7 @@ MALI_STATIC_INLINE u32 mali_pp_job_get_first_unstarted_sub_job(struct mali_pp_jo
 
 MALI_STATIC_INLINE u32 mali_pp_job_get_sub_job_count(struct mali_pp_job *job)
 {
-	return job->uargs.num_cores;
+	return job->sub_jobs_num;
 }
 
 MALI_STATIC_INLINE void mali_pp_job_mark_sub_job_started(struct mali_pp_job *job, u32 sub_job)
@@ -203,9 +212,8 @@ MALI_STATIC_INLINE void mali_pp_job_mark_sub_job_started(struct mali_pp_job *job
 MALI_STATIC_INLINE void mali_pp_job_mark_sub_job_not_stated(struct mali_pp_job *job, u32 sub_job)
 {
 	/* This is only safe on Mali-200. */
-#if !defined(USING_MALI200)
-	MALI_DEBUG_ASSERT(0);
-#endif
+	MALI_DEBUG_ASSERT(_MALI_PRODUCT_ID_MALI200 == mali_kernel_core_get_product_id());
+
 	job->sub_jobs_started--;
 }
 
@@ -267,6 +275,16 @@ MALI_STATIC_INLINE u32 mali_pp_job_get_perf_counter_value1(struct mali_pp_job *j
 	return job->perf_counter_value1[sub_job];
 }
 
+MALI_STATIC_INLINE void mali_pp_job_set_perf_counter_src0(struct mali_pp_job *job, u32 src)
+{
+	job->uargs.perf_counter_src0 = src;
+}
+
+MALI_STATIC_INLINE void mali_pp_job_set_perf_counter_src1(struct mali_pp_job *job, u32 src)
+{
+	job->uargs.perf_counter_src1 = src;
+}
+
 MALI_STATIC_INLINE void mali_pp_job_set_perf_counter_value0(struct mali_pp_job *job, u32 sub_job, u32 value)
 {
 	job->perf_counter_value0[sub_job] = value;
@@ -275,6 +293,15 @@ MALI_STATIC_INLINE void mali_pp_job_set_perf_counter_value0(struct mali_pp_job *
 MALI_STATIC_INLINE void mali_pp_job_set_perf_counter_value1(struct mali_pp_job *job, u32 sub_job, u32 value)
 {
 	job->perf_counter_value1[sub_job] = value;
+}
+
+MALI_STATIC_INLINE _mali_osk_errcode_t mali_pp_job_check(struct mali_pp_job *job)
+{
+	if (mali_pp_job_is_virtual(job) && job->sub_jobs_num != 1)
+	{
+		return _MALI_OSK_ERR_FAULT;
+	}
+	return _MALI_OSK_ERR_OK;
 }
 
 #endif /* __MALI_PP_JOB_H__ */

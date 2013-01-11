@@ -13,7 +13,7 @@
 
 #include "linux/jiffies.h"
 #include "mali_osk.h"
-#include "mali_cluster.h"
+#include "mali_l2_cache.h"
 #include "mali_mmu.h"
 #include "mali_gp.h"
 #include "mali_pp.h"
@@ -24,27 +24,62 @@
 /** @brief A mali group object represents a MMU and a PP and/or a GP core.
  *
  */
-#define MALI_MAX_NUMBER_OF_GROUPS 9
-
-struct mali_group;
-
-enum mali_group_event_t
-{
-	GROUP_EVENT_PP_JOB_COMPLETED,  /**< PP job completed successfully */
-	GROUP_EVENT_PP_JOB_FAILED,     /**< PP job completed with failure */
-	GROUP_EVENT_PP_JOB_TIMED_OUT,  /**< PP job reached max runtime */
-	GROUP_EVENT_GP_JOB_COMPLETED,  /**< GP job completed successfully */
-	GROUP_EVENT_GP_JOB_FAILED,     /**< GP job completed with failure */
-	GROUP_EVENT_GP_JOB_TIMED_OUT,  /**< GP job reached max runtime */
-	GROUP_EVENT_GP_OOM,            /**< GP job ran out of heap memory */
-	GROUP_EVENT_MMU_PAGE_FAULT,    /**< MMU page fault */
-};
+#define MALI_MAX_NUMBER_OF_GROUPS 10
 
 enum mali_group_core_state
 {
-	MALI_GROUP_CORE_STATE_IDLE,
-	MALI_GROUP_CORE_STATE_WORKING,
-	MALI_GROUP_CORE_STATE_OOM
+	MALI_GROUP_STATE_IDLE,
+	MALI_GROUP_STATE_WORKING,
+	MALI_GROUP_STATE_OOM,
+	MALI_GROUP_STATE_IN_VIRTUAL,
+	MALI_GROUP_STATE_JOINING_VIRTUAL,
+	MALI_GROUP_STATE_LEAVING_VIRTUAL,
+};
+
+/**
+ * The structure represents a render group
+ * A render group is defined by all the cores that share the same Mali MMU
+ */
+
+struct mali_group
+{
+	struct mali_mmu_core        *mmu;
+	struct mali_session_data    *session;
+	int                         page_dir_ref_count;
+
+	mali_bool                   power_is_on;
+	enum mali_group_core_state  state; /* @@@@ TODO: include power_is_on in this state? */
+
+	struct mali_gp_core         *gp_core;
+	struct mali_gp_job          *gp_running_job;
+
+	struct mali_pp_core         *pp_core;
+	struct mali_pp_job          *pp_running_job;
+	u32                         pp_running_sub_job;
+
+	struct mali_l2_cache_core   *l2_cache_core[2];
+	u32                         l2_cache_core_ref_count[2];
+
+	struct mali_dlbu_core       *dlbu_core;
+	struct mali_bcast_unit      *bcast_core;
+
+	_mali_osk_lock_t            *lock;
+
+	_mali_osk_list_t            pp_scheduler_list;
+
+	/* List used for virtual groups. For a virtual group, the list represents the
+	 * head element. */
+	_mali_osk_list_t            group_list;
+
+	/* Parent virtual group (if any) */
+	struct mali_group           *parent_group;
+
+	_mali_osk_wq_work_t         *bottom_half_work_mmu;
+	_mali_osk_wq_work_t         *bottom_half_work_gp;
+	_mali_osk_wq_work_t         *bottom_half_work_pp;
+
+	_mali_osk_timer_t           *timeout_timer;
+	mali_bool                   core_timed_out;
 };
 
 /** @brief Create a new Mali group object
@@ -53,10 +88,42 @@ enum mali_group_core_state
  * @param mmu Pointer to the MMU that defines this group
  * @return A pointer to a new group object
  */
-struct mali_group *mali_group_create(struct mali_cluster *cluster, struct mali_mmu_core *mmu);
-void mali_group_add_gp_core(struct mali_group *group, struct mali_gp_core* gp_core);
-void mali_group_add_pp_core(struct mali_group *group, struct mali_pp_core* pp_core);
+struct mali_group *mali_group_create(struct mali_l2_cache_core *core,
+                                     struct mali_dlbu_core *dlbu,
+				     struct mali_bcast_unit *bcast);
+
+_mali_osk_errcode_t mali_group_add_mmu_core(struct mali_group *group, struct mali_mmu_core* mmu_core);
+void mali_group_remove_mmu_core(struct mali_group *group);
+
+_mali_osk_errcode_t mali_group_add_gp_core(struct mali_group *group, struct mali_gp_core* gp_core);
+void mali_group_remove_gp_core(struct mali_group *group);
+
+_mali_osk_errcode_t mali_group_add_pp_core(struct mali_group *group, struct mali_pp_core* pp_core);
+void mali_group_remove_pp_core(struct mali_group *group);
+
 void mali_group_delete(struct mali_group *group);
+
+/** @brief Virtual groups */
+void mali_group_add_group(struct mali_group *parent, struct mali_group *child);
+void mali_group_remove_group(struct mali_group *parent, struct mali_group *child);
+struct mali_group *mali_group_acquire_group(struct mali_group *parent);
+
+MALI_STATIC_INLINE mali_bool mali_group_is_virtual(struct mali_group *group)
+{
+	return (NULL != group->dlbu_core);
+}
+
+/** @brief Check if a group is considered as part of a virtual group
+ *
+ * @note A group is considered to be "part of" a virtual group also during the transition
+ *       in to / out of the virtual group.
+ */
+MALI_STATIC_INLINE mali_bool mali_group_is_in_virtual(struct mali_group *group)
+{
+	return (MALI_GROUP_STATE_IN_VIRTUAL == group->state ||
+	        MALI_GROUP_STATE_JOINING_VIRTUAL == group->state ||
+	        MALI_GROUP_STATE_LEAVING_VIRTUAL == group->state);
+}
 
 /** @brief Reset group
  *
@@ -65,6 +132,12 @@ void mali_group_delete(struct mali_group *group);
  * @param group Pointer to the group to reset
  */
 void mali_group_reset(struct mali_group *group);
+
+/** @brief Zap MMU TLB on all groups
+ *
+ * Zap TLB on group if \a session is active.
+ */
+void mali_group_zap_session(struct mali_group* group, struct mali_session_data *session);
 
 /** @brief Get pointer to GP core object
  */
@@ -102,9 +175,9 @@ _mali_osk_errcode_t mali_group_start_gp_job(struct mali_group *group, struct mal
  */
 _mali_osk_errcode_t mali_group_start_pp_job(struct mali_group *group, struct mali_pp_job *job, u32 sub_job);
 
-/** @brief Resume GP job that suspended waiting for more heap memory
+/** @brief Resume GP job that suspended waiting for more heap memory
  */
-void mali_group_resume_gp_with_new_heap(struct mali_group *group, u32 job_id, u32 start_addr, u32 end_addr);
+struct mali_gp_job *mali_group_resume_gp_with_new_heap(struct mali_group *group, u32 job_id, u32 start_addr, u32 end_addr);
 /** @brief Abort GP job
  *
  * Used to abort suspended OOM jobs when user space failed to allocte more memory.
@@ -116,24 +189,6 @@ void mali_group_abort_gp_job(struct mali_group *group, u32 job_id);
  */
 void mali_group_abort_session(struct mali_group *group, struct mali_session_data *session);
 
-enum mali_group_core_state mali_group_gp_state(struct mali_group *group);
-enum mali_group_core_state mali_group_pp_state(struct mali_group *group);
-
-/** @brief The common group bottom half interrupt handler
- *
- * This is only called from the GP and PP bottom halves.
- *
- * The action taken is dictated by the \a event.
- *
- * @param event The event code
- */
-void mali_group_bottom_half(struct mali_group *group, enum mali_group_event_t event);
-
-struct mali_mmu_core *mali_group_get_mmu(struct mali_group *group);
-struct mali_session_data *mali_group_get_session(struct mali_group *group);
-
-void mali_group_remove_session_if_unused(struct mali_group *group, struct mali_session_data *session_data);
-
 void mali_group_power_on(void);
 void mali_group_power_off(void);
 mali_bool mali_group_power_is_on(struct mali_group *group);
@@ -142,5 +197,14 @@ struct mali_group *mali_group_get_glob_group(u32 index);
 u32 mali_group_get_glob_num_groups(void);
 
 u32 mali_group_dump_state(struct mali_group *group, char *buf, u32 size);
+
+/* MMU-related functions */
+_mali_osk_errcode_t mali_group_upper_half_mmu(void * data);
+
+/* GP-related functions */
+_mali_osk_errcode_t mali_group_upper_half_gp(void *data);
+
+/* PP-related functions */
+_mali_osk_errcode_t mali_group_upper_half_pp(void *data);
 
 #endif /* __MALI_GROUP_H__ */

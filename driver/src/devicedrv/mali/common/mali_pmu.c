@@ -94,14 +94,13 @@ _mali_osk_errcode_t mali_pmu_powerdown_all(struct mali_pmu_core *pmu)
 	mali_hw_core_register_write(&pmu->hw_core, PMU_REG_ADDR_MGMT_POWER_DOWN, pmu->mali_registered_cores_power_mask);
 
 	/* Wait for cores to be powered down (100 x 100us = 100ms) */
-	timeout = 100;
+	timeout = MALI_REG_POLL_COUNT_SLOW ;
 	do
 	{
 		/* Get status of sleeping cores */
 		stat = mali_hw_core_register_read(&pmu->hw_core, PMU_REG_ADDR_MGMT_STATUS);
 		stat &= pmu->mali_registered_cores_power_mask;
 		if( stat == pmu->mali_registered_cores_power_mask ) break; /* All cores we wanted are now asleep */
-		_mali_osk_time_ubusydelay(100);
 		timeout--;
 	} while( timeout > 0 );
 
@@ -125,18 +124,17 @@ _mali_osk_errcode_t mali_pmu_powerup_all(struct mali_pmu_core *pmu)
 	mali_hw_core_register_write(&pmu->hw_core, PMU_REG_ADDR_MGMT_POWER_UP, pmu->mali_registered_cores_power_mask);
 
 	/* Wait for cores to be powered up (100 x 100us = 100ms) */
-	timeout = 100;
+	timeout = MALI_REG_POLL_COUNT_SLOW;
 	do
 	{
 		/* Get status of sleeping cores */
 		stat = mali_hw_core_register_read(&pmu->hw_core,PMU_REG_ADDR_MGMT_STATUS);
 		stat &= pmu->mali_registered_cores_power_mask;
-		if( stat == 0 ) break; /* All cores we wanted are now awake */
-		_mali_osk_time_ubusydelay(100);
+		if ( stat == 0 ) break; /* All cores we wanted are now awake */
 		timeout--;
-	} while( timeout > 0 );
+	} while ( timeout > 0 );
 
-	if( timeout == 0 )
+	if ( timeout == 0 )
 	{
 		return _MALI_OSK_ERR_TIMEOUT;
 	}

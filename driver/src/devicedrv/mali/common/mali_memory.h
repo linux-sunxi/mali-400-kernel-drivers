@@ -14,9 +14,6 @@
 #include "mali_osk.h"
 #include "mali_session.h"
 
-struct mali_cluster;
-struct mali_group;
-
 /** @brief Initialize Mali memory subsystem
  *
  * Allocate and initialize internal data structures. Must be called before
@@ -70,12 +67,19 @@ void mali_mmu_release_table_page(u32 pa);
 
 
 /** @brief Parse resource and prepare the OS memory allocator
+ *
+ * @param size Maximum size to allocate for Mali GPU.
+ * @return _MALI_OSK_ERR_OK on success, otherwise failure.
  */
-_mali_osk_errcode_t mali_memory_core_resource_os_memory(_mali_osk_resource_t * resource);
+_mali_osk_errcode_t mali_memory_core_resource_os_memory(u32 size);
 
 /** @brief Parse resource and prepare the dedicated memory allocator
+ *
+ * @param start Physical start address of dedicated Mali GPU memory.
+ * @param size Size of dedicated Mali GPU memory.
+ * @return _MALI_OSK_ERR_OK on success, otherwise failure.
  */
-_mali_osk_errcode_t mali_memory_core_resource_dedicated_memory(_mali_osk_resource_t * resource);
+_mali_osk_errcode_t mali_memory_core_resource_dedicated_memory(u32 start, u32 size);
 
 mali_allocation_engine mali_mem_get_memory_engine(void);
 

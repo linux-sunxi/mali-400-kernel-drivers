@@ -11,7 +11,7 @@
 #ifndef __MALI_OSK_PROFILING_H__
 #define __MALI_OSK_PROFILING_H__
 
-#if MALI_TIMELINE_PROFILING_ENABLED && defined (CONFIG_TRACEPOINTS)
+#if defined(CONFIG_MALI400_PROFILING) && defined (CONFIG_TRACEPOINTS)
 
 #include "mali_linux_trace.h"
 #include "mali_profiling_events.h"
@@ -127,12 +127,13 @@ mali_bool _mali_osk_profiling_have_recording(void);
 
 /** @} */ /* end group _mali_osk_profiling */
 
-#else
+#else /* defined(CONFIG_MALI400_PROFILING)  && defined(CONFIG_TRACEPOINTS) */
+
  /* Dummy add_event, for when profiling is disabled. */
 
 #define _mali_osk_profiling_add_event(event_id, data0, data1, data2, data3, data4)
 
-#endif /* MALI_TIMELINE_PROFILING_ENABLED  && defined(CONFIG_TRACEPOINTS*/
+#endif /* defined(CONFIG_MALI400_PROFILING)  && defined(CONFIG_TRACEPOINTS) */
 
 #endif /* __MALI_OSK_PROFILING_H__ */
 

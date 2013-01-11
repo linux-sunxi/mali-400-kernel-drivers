@@ -9,7 +9,6 @@
  */
 
 #include "mali_kernel_common.h"
-#include "mali_kernel_core.h"
 #include "mali_kernel_memory_engine.h"
 #include "mali_osk.h"
 #include "mali_osk_list.h"

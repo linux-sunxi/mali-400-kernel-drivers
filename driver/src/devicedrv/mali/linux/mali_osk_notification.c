@@ -16,9 +16,6 @@
 #include "mali_osk.h"
 #include "mali_kernel_common.h"
 
-/* needed to detect kernel version specific code */
-#include <linux/version.h>
-
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -38,8 +35,8 @@ struct _mali_osk_notification_queue_t_struct
 
 typedef struct _mali_osk_notification_wrapper_t_struct
 {
-    struct list_head list;           /**< Internal linked list variable */
-    _mali_osk_notification_t data;   /**< Notification data */
+	struct list_head list;           /**< Internal linked list variable */
+	_mali_osk_notification_t data;   /**< Notification data */
 } _mali_osk_notification_wrapper_t;
 
 _mali_osk_notification_queue_t *_mali_osk_notification_queue_init( void )
@@ -59,15 +56,15 @@ _mali_osk_notification_queue_t *_mali_osk_notification_queue_init( void )
 _mali_osk_notification_t *_mali_osk_notification_create( u32 type, u32 size )
 {
 	/* OPT Recycling of notification objects */
-    _mali_osk_notification_wrapper_t *notification;
+	_mali_osk_notification_wrapper_t *notification;
 
 	notification = (_mali_osk_notification_wrapper_t *)kmalloc( sizeof(_mali_osk_notification_wrapper_t) + size,
 	                                                            GFP_KERNEL | __GFP_HIGH | __GFP_REPEAT);
-    if (NULL == notification)
-    {
+	if (NULL == notification)
+	{
 		MALI_DEBUG_PRINT(1, ("Failed to create a notification object\n"));
 		return NULL;
-    }
+	}
 
 	/* Init the list */
 	INIT_LIST_HEAD(&notification->list);
@@ -86,7 +83,7 @@ _mali_osk_notification_t *_mali_osk_notification_create( u32 type, u32 size )
 	notification->data.result_buffer_size = size;
 
 	/* all ok */
-    return &(notification->data);
+	return &(notification->data);
 }
 
 void _mali_osk_notification_delete( _mali_osk_notification_t *object )
@@ -94,7 +91,7 @@ void _mali_osk_notification_delete( _mali_osk_notification_t *object )
 	_mali_osk_notification_wrapper_t *notification;
 	MALI_DEBUG_ASSERT_POINTER( object );
 
-    notification = container_of( object, _mali_osk_notification_wrapper_t, data );
+	notification = container_of( object, _mali_osk_notification_wrapper_t, data );
 
 	/* Free the container */
 	kfree(notification);
@@ -110,18 +107,29 @@ void _mali_osk_notification_queue_term( _mali_osk_notification_queue_t *queue )
 
 void _mali_osk_notification_queue_send( _mali_osk_notification_queue_t *queue, _mali_osk_notification_t *object )
 {
+#if defined(MALI_UPPER_HALF_SCHEDULING)
+	unsigned long irq_flags;
+#endif
+
 	_mali_osk_notification_wrapper_t *notification;
 	MALI_DEBUG_ASSERT_POINTER( queue );
 	MALI_DEBUG_ASSERT_POINTER( object );
 
-    notification = container_of( object, _mali_osk_notification_wrapper_t, data );
+	notification = container_of( object, _mali_osk_notification_wrapper_t, data );
 
-	/* lock queue access */
+#if defined(MALI_UPPER_HALF_SCHEDULING)
+	spin_lock_irqsave(&queue->mutex, irq_flags);
+#else
 	spin_lock(&queue->mutex);
-	/* add to list */
+#endif
+
 	list_add_tail(&notification->list, &queue->head);
-	/* unlock the queue */
+
+#if defined(MALI_UPPER_HALF_SCHEDULING)
+	spin_unlock_irqrestore(&queue->mutex, irq_flags);
+#else
 	spin_unlock(&queue->mutex);
+#endif
 
 	/* and wake up one possible exclusive waiter */
 	wake_up(&queue->receive_queue);
@@ -129,10 +137,18 @@ void _mali_osk_notification_queue_send( _mali_osk_notification_queue_t *queue, _
 
 _mali_osk_errcode_t _mali_osk_notification_queue_dequeue( _mali_osk_notification_queue_t *queue, _mali_osk_notification_t **result )
 {
+#if defined(MALI_UPPER_HALF_SCHEDULING)
+	unsigned long irq_flags;
+#endif
+
 	_mali_osk_errcode_t ret = _MALI_OSK_ERR_ITEM_NOT_FOUND;
 	_mali_osk_notification_wrapper_t *wrapper_object;
 
+#if defined(MALI_UPPER_HALF_SCHEDULING)
+	spin_lock_irqsave(&queue->mutex, irq_flags);
+#else
 	spin_lock(&queue->mutex);
+#endif
 
 	if (!list_empty(&queue->head))
 	{
@@ -142,7 +158,11 @@ _mali_osk_errcode_t _mali_osk_notification_queue_dequeue( _mali_osk_notification
 		ret = _MALI_OSK_ERR_OK;
 	}
 
+#if defined(MALI_UPPER_HALF_SCHEDULING)
+	spin_unlock_irqrestore(&queue->mutex, irq_flags);
+#else
 	spin_unlock(&queue->mutex);
+#endif
 
 	return ret;
 }
@@ -153,7 +173,7 @@ _mali_osk_errcode_t _mali_osk_notification_queue_receive( _mali_osk_notification
 	MALI_DEBUG_ASSERT_POINTER( queue );
 	MALI_DEBUG_ASSERT_POINTER( result );
 
-    /* default result */
+	/* default result */
 	*result = NULL;
 
 	if (wait_event_interruptible(queue->receive_queue,

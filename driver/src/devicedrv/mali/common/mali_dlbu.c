@@ -23,8 +23,6 @@
 u32 mali_dlbu_phys_addr = 0;
 static mali_io_address mali_dlbu_cpu_addr = 0;
 
-static u32 mali_dlbu_tile_position;
-
 /**
  * DLBU register numbers
  * Used in the register read/write routines.
@@ -86,7 +84,7 @@ struct mali_dlbu_core
 _mali_osk_errcode_t mali_dlbu_initialize(void)
 {
 
-	MALI_DEBUG_PRINT(2, ("Dynamic Load Balancing Unit initializing\n"));
+	MALI_DEBUG_PRINT(2, ("Mali DLBU: Initializing\n"));
 
 	if (_MALI_OSK_ERR_OK == mali_mmu_get_table_page(&mali_dlbu_phys_addr, &mali_dlbu_cpu_addr))
 	{
@@ -114,10 +112,9 @@ struct mali_dlbu_core *mali_dlbu_create(const _mali_osk_resource_t * resource)
 	{
 		if (_MALI_OSK_ERR_OK == mali_hw_core_create(&core->hw_core, resource, MALI_DLBU_SIZE))
 		{
+			core->pp_cores_mask = 0;
 			if (_MALI_OSK_ERR_OK == mali_dlbu_reset(core))
 			{
-				mali_hw_core_register_write(&core->hw_core, MALI_DLBU_REGISTER_MASTER_TLLIST_VADDR, MALI_DLB_VIRT_ADDR);
-
 				return core;
 			}
 			MALI_PRINT_ERROR(("Failed to reset DLBU %s\n", core->hw_core.description));
@@ -136,150 +133,82 @@ struct mali_dlbu_core *mali_dlbu_create(const _mali_osk_resource_t * resource)
 
 void mali_dlbu_delete(struct mali_dlbu_core *dlbu)
 {
+	MALI_DEBUG_ASSERT_POINTER(dlbu);
+
 	mali_dlbu_reset(dlbu);
 	mali_hw_core_delete(&dlbu->hw_core);
 	_mali_osk_free(dlbu);
 }
 
-void mali_dlbu_enable(struct mali_dlbu_core *dlbu)
-{
-	u32 wval = mali_hw_core_register_read(&dlbu->hw_core, MALI_DLBU_REGISTER_MASTER_TLLIST_PHYS_ADDR);
-
-	wval |= 0x1;
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_MASTER_TLLIST_PHYS_ADDR, wval);
-}
-
-void mali_dlbu_disable(struct mali_dlbu_core *dlbu)
-{
-	u32 wval = mali_hw_core_register_read(&dlbu->hw_core, MALI_DLBU_REGISTER_MASTER_TLLIST_PHYS_ADDR);
-
-	wval |= (wval & 0xFFFFFFFE);
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_MASTER_TLLIST_PHYS_ADDR, wval);
-}
-
-_mali_osk_errcode_t mali_dlbu_enable_pp_core(struct mali_dlbu_core *dlbu, u32 pp_core_enable, u32 val)
-{
-	u32 wval = mali_hw_core_register_read(&dlbu->hw_core, MALI_DLBU_REGISTER_PP_ENABLE_MASK);
-
-	if((pp_core_enable < mali_pp_get_glob_num_pp_cores()) && ((0 == val) || (1 == val))) /* check for valid input parameters */
-	{
-		if (val == 1)
-		{
-			val = (wval | (pp_core_enable <<= 0x1));
-		}
-		if (val == 0)
-		{
-			val = (wval & ~(pp_core_enable << 0x1));
-		}
-		wval |= val;
-		mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_PP_ENABLE_MASK, wval);
-		dlbu->pp_cores_mask = wval;
-
-		return _MALI_OSK_ERR_OK;
-	}
-
-	return _MALI_OSK_ERR_FAULT;
-}
-
-void mali_dlbu_enable_all_pp_cores(struct mali_dlbu_core *dlbu)
-{
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_PP_ENABLE_MASK, dlbu->pp_cores_mask);
-}
-
-void mali_dlbu_disable_all_pp_cores(struct mali_dlbu_core *dlbu)
-{
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_PP_ENABLE_MASK, 0x0);
-}
-
-void mali_dlbu_setup(struct mali_dlbu_core *dlbu, u8 fb_xdim, u8 fb_ydim, u8 xtilesize, u8 ytilesize, u8 blocksize, u8 xgr0, u8 ygr0, u8 xgr1, u8 ygr1)
-{
-	u32 wval = 0x0;
-
-	/* write the framebuffer dimensions */
-	wval = (16 << (u32)fb_ydim) | (u32)fb_xdim;
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_FB_DIM, wval);
-
-	/* write the tile list configuration */
-	wval = 0x0;
-	wval = (28 << (u32)blocksize) | (16 << (u32)ytilesize) | ((u32)xtilesize);
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_TLLIST_CONF, wval);
-
-	/* write the start tile position */
-	wval = 0x0;
-	wval = (24 << (u32)ygr1 | (16 << (u32)xgr1) | 8 << (u32)ygr0) | (u32)xgr0;
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_START_TILE_POS, wval);
-}
-
 _mali_osk_errcode_t mali_dlbu_reset(struct mali_dlbu_core *dlbu)
 {
+	u32 dlbu_registers[7];
 	_mali_osk_errcode_t err = _MALI_OSK_ERR_FAULT;
 	MALI_DEBUG_ASSERT_POINTER(dlbu);
 
 	MALI_DEBUG_PRINT(4, ("Mali DLBU: mali_dlbu_reset: %s\n", dlbu->hw_core.description));
 
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_MASTER_TLLIST_PHYS_ADDR, mali_dlbu_phys_addr);
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_TLLIST_VBASEADDR, 0x00);
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_FB_DIM, 0x00);
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_TLLIST_CONF, 0x00);
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_START_TILE_POS, 0x00);
+	dlbu_registers[0] = mali_dlbu_phys_addr | 1; /* bit 0 enables the whole core */
+	dlbu_registers[1] = MALI_DLBU_VIRT_ADDR;
+	dlbu_registers[2] = 0;
+	dlbu_registers[3] = 0;
+	dlbu_registers[4] = 0;
+	dlbu_registers[5] = 0;
+	dlbu_registers[6] = dlbu->pp_cores_mask;
 
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_PP_ENABLE_MASK, dlbu->pp_cores_mask);
+	/* write reset values to core registers */
+	mali_hw_core_register_write_array_relaxed(&dlbu->hw_core, MALI_DLBU_REGISTER_MASTER_TLLIST_PHYS_ADDR, dlbu_registers, 7);
 
 	err = _MALI_OSK_ERR_OK;
 
 	return err;
 }
 
-_mali_osk_errcode_t mali_dlbu_add_group(struct mali_dlbu_core *dlbu, struct mali_group *group)
+void mali_dlbu_add_group(struct mali_dlbu_core *dlbu, struct mali_group *group)
 {
-	_mali_osk_errcode_t err = _MALI_OSK_ERR_FAULT;
-	u32 wval, rval;
-	struct mali_pp_core *pp_core = mali_group_get_pp_core(group);
+	struct mali_pp_core *pp_core;
+	u32 core_id;
 
-	/* find the core id and set the mask */
+	MALI_DEBUG_ASSERT_POINTER( dlbu );
+	MALI_DEBUG_ASSERT_POINTER( group );
 
-	if (NULL != pp_core)
-	{
-		wval = mali_pp_core_get_id(pp_core);
-		rval = mali_hw_core_register_read(&dlbu->hw_core, MALI_DLBU_REGISTER_PP_ENABLE_MASK);
-		mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_PP_ENABLE_MASK, (wval << 0x1) | rval);
-		err = _MALI_OSK_ERR_OK;
-	}
+	pp_core = mali_group_get_pp_core(group);
+	core_id = mali_pp_core_get_id(pp_core);
 
-	return err;
+	dlbu->pp_cores_mask |= (0x1 << core_id);
+	MALI_DEBUG_PRINT(3, ("Mali DLBU: Adding core[%d] New mask= 0x%02x\n",core_id , dlbu->pp_cores_mask));
+
+	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_PP_ENABLE_MASK, dlbu->pp_cores_mask);
 }
 
-void mali_dlbu_set_tllist_base_address(struct mali_dlbu_core *dlbu, u32 val)
+/* Remove a group from the DLBU */
+void mali_dlbu_remove_group(struct mali_dlbu_core *dlbu, struct mali_group *group)
 {
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_TLLIST_VBASEADDR, val);
+	struct mali_pp_core *pp_core;
+	u32 core_id;
+
+	MALI_DEBUG_ASSERT_POINTER( dlbu );
+	MALI_DEBUG_ASSERT_POINTER( group );
+
+	pp_core = mali_group_get_pp_core(group);
+	core_id = mali_pp_core_get_id(pp_core);
+
+	dlbu->pp_cores_mask &= ~(0x1 << core_id);
+		MALI_DEBUG_PRINT(3, ("Mali DLBU: Removing core[%d] New mask= 0x%02x\n", core_id, dlbu->pp_cores_mask));
+
+	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_PP_ENABLE_MASK, dlbu->pp_cores_mask);
 }
 
-void mali_dlbu_pp_jobs_stop(struct mali_dlbu_core *dlbu)
+/* Configure the DLBU for \a job. This needs to be done before the job is started on the groups in the DLBU. */
+void mali_dlbu_config_job(struct mali_dlbu_core *dlbu, struct mali_pp_job *job)
 {
-	/* this function to implement (see documentation):
-	 * 1) clear all bits in the enable register
-	 * 2) wait until all PPs have finished - mali_pp_scheduler.c code - this done in interrupts call?
-	 * 3) read the current tile position registers to get current tile positions -
-	 * note that current tile position register is the same as start tile position - perhaps the name should be changed!!! */
+	u32 *registers;
+	MALI_DEBUG_ASSERT(job);
+	registers = mali_pp_job_get_dlbu_registers(job);
+	MALI_DEBUG_PRINT(4, ("Mali DLBU: Starting job\n"));
 
-	/* 1) */
-	mali_dlbu_disable_all_pp_cores(dlbu);
+	/* Writing 4 registers:
+	 * DLBU registers except the first two (written once at DLBU initialisation / reset) and the PP_ENABLE_MASK register */
+	mali_hw_core_register_write_array_relaxed(&dlbu->hw_core, MALI_DLBU_REGISTER_TLLIST_VBASEADDR, registers, 4);
 
-	/* 3) */
-	mali_dlbu_tile_position = mali_hw_core_register_read(&dlbu->hw_core, MALI_DLBU_REGISTER_START_TILE_POS);
-}
-
-void mali_dlbu_pp_jobs_restart(struct mali_dlbu_core *dlbu)
-{
-	/* this function to implement (see the document):
-	 * 1) configure the dynamic load balancing unit as normal
-	 * 2) set the current tile position registers as read when stopping the job
-	 * 3) configure the PPs to start the job as normal - done by another part of the system - scheduler */
-
-	/* 1) */
-	mali_dlbu_reset(dlbu);
-	/* ++ setup the needed values - see this */
-
-	/* 2)  */
-	mali_hw_core_register_write(&dlbu->hw_core, MALI_DLBU_REGISTER_START_TILE_POS, mali_dlbu_tile_position);
 }

@@ -22,27 +22,27 @@ typedef struct
 
 static _mali_mem_validation_t mali_mem_validator = { MALI_INVALID_MEM_ADDR, MALI_INVALID_MEM_ADDR };
 
-_mali_osk_errcode_t mali_mem_validation_add_range(const _mali_osk_resource_t *resource)
+_mali_osk_errcode_t mali_mem_validation_add_range(u32 start, u32 size)
 {
 	/* Check that no other MEM_VALIDATION resources exist */
 	if (MALI_INVALID_MEM_ADDR != mali_mem_validator.phys_base)
 	{
-		MALI_PRINT_ERROR(("Failed to add MEM_VALIDATION resource %s; another range is already specified\n", resource->description));
+		MALI_PRINT_ERROR(("Failed to add frame buffer memory; another range is already specified\n"));
 		return _MALI_OSK_ERR_FAULT;
 	}
 
 	/* Check restrictions on page alignment */
-	if ((0 != (resource->base & (~_MALI_OSK_CPU_PAGE_MASK))) ||
-	    (0 != (resource->size & (~_MALI_OSK_CPU_PAGE_MASK))))
+	if ((0 != (start & (~_MALI_OSK_CPU_PAGE_MASK))) ||
+	    (0 != (size & (~_MALI_OSK_CPU_PAGE_MASK))))
 	{
-		MALI_PRINT_ERROR(("Failed to add MEM_VALIDATION resource %s; incorrect alignment\n", resource->description));
+		MALI_PRINT_ERROR(("Failed to add frame buffer memory; incorrect alignment\n"));
 		return _MALI_OSK_ERR_FAULT;
 	}
 
-	mali_mem_validator.phys_base = resource->base;
-	mali_mem_validator.size = resource->size;
-	MALI_DEBUG_PRINT(2, ("Memory Validator '%s' installed for Mali physical address base=0x%08X, size=0x%08X\n",
-	                 resource->description, mali_mem_validator.phys_base, mali_mem_validator.size));
+	mali_mem_validator.phys_base = start;
+	mali_mem_validator.size = size;
+	MALI_DEBUG_PRINT(2, ("Memory Validator installed for Mali physical address base=0x%08X, size=0x%08X\n",
+	                 mali_mem_validator.phys_base, mali_mem_validator.size));
 
 	return _MALI_OSK_ERR_OK;
 }

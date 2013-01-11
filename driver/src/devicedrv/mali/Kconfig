@@ -1,9 +1,10 @@
 config MALI400
 	tristate "Mali-300/400/450 support"
 	depends on ARM
-	select FB
+	select DMA_SHARED_BUFFER
 	---help---
-	  This enables support for the Mali-300, Mali-400, and Mali-450 GPUs.
+	  This enables support for the ARM Mali-300, Mali-400, and Mali-450
+	  GPUs.
 
 	  To compile this driver as a module, choose M here: the module will be
 	  called mali.
@@ -12,19 +13,26 @@ config MALI400_DEBUG
 	bool "Enable debug in Mali driver"
 	depends on MALI400
 	---help---
-	  This enabled extra debug checks and messages in the Mali-300/400/450
-	  driver.
+	  This enabled extra debug checks and messages in the Mali driver.
 
 config MALI400_PROFILING
 	bool "Enable Mali profiling"
-	depends on MALI400 && TRACEPOINTS
+	depends on MALI400
+	select TRACEPOINTS
+	default y
 	---help---
 	  This enables gator profiling of Mali GPU events.
 
-config MALI400_GPU_UTILIZATION
-	bool "Enable Mali GPU utilization tracking"
+config MALI400_INTERNAL_PROFILING
+	bool "Enable internal Mali profiling API"
+	depends on MALI400_PROFILING
+	default n
+	---help---
+	  This enables the internal legacy Mali profiling API.
+
+config MALI400_UMP
+	bool "Enable UMP support"
 	depends on MALI400
 	---help---
-	  This enables gathering and processing of the utilization of Mali GPU.
-	  This data can be used as a basis to change GPU operating frequency.
+	  This enables support for the UMP memory sharing API in the Mali driver.
 

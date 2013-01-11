@@ -19,12 +19,18 @@
 int pp_start_job_wrapper(struct mali_session_data *session_data, _mali_uk_pp_start_job_s __user *uargs)
 {
 	_mali_osk_errcode_t err;
+	int fence = -1;
 
 	MALI_CHECK_NON_NULL(uargs, -EINVAL);
 	MALI_CHECK_NON_NULL(session_data, -EINVAL);
 
-	err = _mali_ukk_pp_start_job(session_data, uargs);
+	err = _mali_ukk_pp_start_job(session_data, uargs, &fence);
 	if (_MALI_OSK_ERR_OK != err) return map_errcode(err);
+
+	if (-1 != fence)
+	{
+		if (0 != put_user(fence, &uargs->fence)) return -EFAULT;
+	}
 
 	return 0;
 }

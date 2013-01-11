@@ -9,17 +9,14 @@
  */
 #include "mali_kernel_common.h"
 #include "mali_osk.h"
-
 #include "mali_l2_cache.h"
 #include "mali_hw_core.h"
-#include "mali_pm.h"
+#include "mali_scheduler.h"
 
 /**
  * Size of the Mali L2 cache registers in bytes
  */
 #define MALI400_L2_CACHE_REGISTERS_SIZE 0x30
-
-#define MALI_MAX_NUMBER_OF_L2_CACHE_CORES  3
 
 /**
  * Mali L2 cache register numbers
@@ -82,6 +79,8 @@ struct mali_l2_cache_core
 	_mali_osk_lock_t    *counter_lock; /**< Synchronize L2 cache counter access */
 	u32                  counter_src0; /**< Performance counter 0, MALI_HW_CORE_NO_COUNTER for disabled */
 	u32                  counter_src1; /**< Performance counter 1, MALI_HW_CORE_NO_COUNTER for disabled */
+	u32                  last_invalidated_id;
+	mali_bool            power_is_enabled;
 };
 
 #define MALI400_L2_MAX_READS_DEFAULT 0x1C
@@ -98,6 +97,13 @@ static _mali_osk_errcode_t mali_l2_cache_send_command(struct mali_l2_cache_core 
 struct mali_l2_cache_core *mali_l2_cache_create(_mali_osk_resource_t *resource)
 {
 	struct mali_l2_cache_core *cache = NULL;
+	_mali_osk_lock_flags_t lock_flags;
+
+#if defined(MALI_UPPER_HALF_SCHEDULING)
+	lock_flags = _MALI_OSK_LOCKFLAG_ORDERED | _MALI_OSK_LOCKFLAG_SPINLOCK_IRQ | _MALI_OSK_LOCKFLAG_NONINTERRUPTABLE;
+#else
+	lock_flags = _MALI_OSK_LOCKFLAG_ORDERED | _MALI_OSK_LOCKFLAG_SPINLOCK | _MALI_OSK_LOCKFLAG_NONINTERRUPTABLE;
+#endif
 
 	MALI_DEBUG_PRINT(2, ("Mali L2 cache: Creating Mali L2 cache: %s\n", resource->description));
 
@@ -115,27 +121,21 @@ struct mali_l2_cache_core *mali_l2_cache_create(_mali_osk_resource_t *resource)
 		cache->counter_src1 = MALI_HW_CORE_NO_COUNTER;
 		if (_MALI_OSK_ERR_OK == mali_hw_core_create(&cache->hw_core, resource, MALI400_L2_CACHE_REGISTERS_SIZE))
 		{
-			cache->command_lock = _mali_osk_lock_init(_MALI_OSK_LOCKFLAG_ORDERED | _MALI_OSK_LOCKFLAG_SPINLOCK | _MALI_OSK_LOCKFLAG_NONINTERRUPTABLE,
-			                                          0, _MALI_OSK_LOCK_ORDER_L2_COMMAND);
+			cache->command_lock = _mali_osk_lock_init(lock_flags, 0, _MALI_OSK_LOCK_ORDER_L2_COMMAND);
 			if (NULL != cache->command_lock)
 			{
-				cache->counter_lock = _mali_osk_lock_init(_MALI_OSK_LOCKFLAG_ORDERED | _MALI_OSK_LOCKFLAG_SPINLOCK | _MALI_OSK_LOCKFLAG_NONINTERRUPTABLE,
-				                                          0, _MALI_OSK_LOCK_ORDER_L2_COUNTER);
+				cache->counter_lock = _mali_osk_lock_init(lock_flags, 0, _MALI_OSK_LOCK_ORDER_L2_COUNTER);
 				if (NULL != cache->counter_lock)
 				{
-					if (_MALI_OSK_ERR_OK == mali_l2_cache_reset(cache))
-					{
-						mali_global_l2_cache_cores[mali_global_num_l2_cache_cores] = cache;
-						mali_global_num_l2_cache_cores++;
+					mali_l2_cache_reset(cache);
 
-						return cache;
-					}
-					else
-					{
-						MALI_PRINT_ERROR(("Mali L2 cache: Failed to reset L2 cache core %s\n", cache->hw_core.description));
-					}
+					cache->last_invalidated_id = 0;
+					cache->power_is_enabled = MALI_TRUE;
 
-					_mali_osk_lock_term(cache->counter_lock);
+					mali_global_l2_cache_cores[mali_global_num_l2_cache_cores] = cache;
+					mali_global_num_l2_cache_cores++;
+
+					return cache;
 				}
 				else
 				{
@@ -174,7 +174,7 @@ void mali_l2_cache_delete(struct mali_l2_cache_core *cache)
 	_mali_osk_lock_term(cache->command_lock);
 	mali_hw_core_delete(&cache->hw_core);
 
-	for (i = 0; i < mali_global_num_l2_cache_cores; i++)
+	for (i = 0; i < MALI_MAX_NUMBER_OF_L2_CACHE_CORES; i++)
 	{
 		if (mali_global_l2_cache_cores[i] == cache)
 		{
@@ -184,6 +184,16 @@ void mali_l2_cache_delete(struct mali_l2_cache_core *cache)
 	}
 
 	_mali_osk_free(cache);
+}
+
+void mali_l2_cache_power_is_enabled_set(struct mali_l2_cache_core * core, mali_bool power_is_enabled)
+{
+       core->power_is_enabled = power_is_enabled;
+}
+
+mali_bool mali_l2_cache_power_is_enabled_get(struct mali_l2_cache_core * core)
+{
+       return core->power_is_enabled;
 }
 
 u32 mali_l2_cache_get_id(struct mali_l2_cache_core *cache)
@@ -280,7 +290,7 @@ void mali_l2_cache_core_get_counter_values(struct mali_l2_cache_core *cache, u32
 		*value0 = mali_hw_core_register_read(&cache->hw_core, MALI400_L2_CACHE_REGISTER_PERFCNT_VAL0);
 	}
 
-	if (cache->counter_src0 != MALI_HW_CORE_NO_COUNTER)
+	if (cache->counter_src1 != MALI_HW_CORE_NO_COUNTER)
 	{
 		*value1 = mali_hw_core_register_read(&cache->hw_core, MALI400_L2_CACHE_REGISTER_PERFCNT_VAL1);
 	}
@@ -303,12 +313,7 @@ u32 mali_l2_cache_core_get_glob_num_l2_cores(void)
 	return mali_global_num_l2_cache_cores;
 }
 
-u32 mali_l2_cache_core_get_max_num_l2_cores(void)
-{
-	return MALI_MAX_NUMBER_OF_L2_CACHE_CORES;
-}
-
-_mali_osk_errcode_t mali_l2_cache_reset(struct mali_l2_cache_core *cache)
+void mali_l2_cache_reset(struct mali_l2_cache_core *cache)
 {
 	/* Invalidate cache (just to keep it in a known state at startup) */
 	mali_l2_cache_invalidate_all(cache);
@@ -331,13 +336,59 @@ _mali_osk_errcode_t mali_l2_cache_reset(struct mali_l2_cache_core *cache)
 	}
 
 	_mali_osk_lock_signal(cache->counter_lock, _MALI_OSK_LOCKMODE_RW);
+}
 
-	return _MALI_OSK_ERR_OK;
+void mali_l2_cache_reset_all(void)
+{
+	int i;
+	u32 num_cores = mali_l2_cache_core_get_glob_num_l2_cores();
+
+	for (i = 0; i < num_cores; i++)
+	{
+		mali_l2_cache_reset(mali_l2_cache_core_get_glob_l2_core(i));
+	}
 }
 
 _mali_osk_errcode_t mali_l2_cache_invalidate_all(struct mali_l2_cache_core *cache)
 {
 	return mali_l2_cache_send_command(cache, MALI400_L2_CACHE_REGISTER_COMMAND, MALI400_L2_CACHE_COMMAND_CLEAR_ALL);
+}
+
+mali_bool mali_l2_cache_invalidate_all_conditional(struct mali_l2_cache_core *cache, u32 id)
+{
+       MALI_DEBUG_ASSERT_POINTER(cache);
+
+       if (NULL != cache)
+       {
+               /* If the last cache invalidation was done by a job with a higher id we
+                * don't have to flush. Since user space will store jobs w/ their
+                * corresponding memory in sequence (first job #0, then job #1, ...),
+                * we don't have to flush for job n-1 if job n has already invalidated
+                * the cache since we know for sure that job n-1's memory was already
+                * written when job n was started. */
+               if (((s32)id) <= ((s32)cache->last_invalidated_id))
+               {
+                       return MALI_FALSE;
+               }
+               else
+               {
+                       cache->last_invalidated_id = mali_scheduler_get_new_id();
+               }
+
+               mali_l2_cache_invalidate_all(cache);
+       }
+       return MALI_TRUE;
+}
+
+void mali_l2_cache_invalidate_all_force(struct mali_l2_cache_core *cache)
+{
+       MALI_DEBUG_ASSERT_POINTER(cache);
+
+       if (NULL != cache)
+       {
+               cache->last_invalidated_id = mali_scheduler_get_new_id();
+               mali_l2_cache_invalidate_all(cache);
+       }
 }
 
 _mali_osk_errcode_t mali_l2_cache_invalidate_pages(struct mali_l2_cache_core *cache, u32 *pages, u32 num_pages)
@@ -357,21 +408,30 @@ _mali_osk_errcode_t mali_l2_cache_invalidate_pages(struct mali_l2_cache_core *ca
 	return ret;
 }
 
+void mali_l2_cache_invalidate_pages_conditional(u32 *pages, u32 num_pages)
+{
+       u32 i;
+
+       for (i = 0; i < mali_global_num_l2_cache_cores; i++)
+       {
+               /*additional check*/
+               if (MALI_TRUE == mali_l2_cache_lock_power_state(mali_global_l2_cache_cores[i]))
+               {
+                       mali_l2_cache_invalidate_pages(mali_global_l2_cache_cores[i], pages, num_pages);
+               }
+               mali_l2_cache_unlock_power_state(mali_global_l2_cache_cores[i]);
+               /*check for failed power locking???*/
+       }
+}
+
 mali_bool mali_l2_cache_lock_power_state(struct mali_l2_cache_core *cache)
 {
-	/*
-	 * Take PM lock and check power state.
-	 * Returns MALI_TRUE if module is powered on.
-	 * Power state will not change until mali_l2_cache_unlock_power_state() is called.
-	 */
-	mali_pm_lock();
-	return mali_pm_is_powered_on();
+	return _mali_osk_pm_dev_ref_add_no_power_on();
 }
 
 void mali_l2_cache_unlock_power_state(struct mali_l2_cache_core *cache)
 {
-	/* Release PM lock */
-	mali_pm_unlock();
+	_mali_osk_pm_dev_ref_dec_no_power_on();
 }
 
 /* -------- local helper functions below -------- */

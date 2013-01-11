@@ -17,8 +17,8 @@
 #include "mali_session.h"
 
 /**
- * The structure represends a GP job, including all sub-jobs
- * (This struct unfortunatly needs to be public because of how the _mali_osk_list_*
+ * The structure represents a GP job, including all sub-jobs
+ * (This struct unfortunately needs to be public because of how the _mali_osk_list_*
  * mechanism works)
  */
 struct mali_gp_job
@@ -32,10 +32,17 @@ struct mali_gp_job
 	u32 perf_counter_value1;                           /**< Value of performance counter 1 (to be returned to user space) */
 	u32 pid;                                           /**< Process ID of submitting process */
 	u32 tid;                                           /**< Thread ID of submitting thread */
+	_mali_osk_notification_t *finished_notification;   /**< Notification sent back to userspace on job complete */
+	_mali_osk_notification_t *oom_notification;        /**< Notification sent back to userspace on OOM */
 };
 
 struct mali_gp_job *mali_gp_job_create(struct mali_session_data *session, _mali_uk_gp_start_job_s *uargs, u32 id);
 void mali_gp_job_delete(struct mali_gp_job *job);
+
+u32 mali_gp_job_get_gp_counter_src0(void);
+mali_bool mali_gp_job_set_gp_counter_src0(u32 counter);
+u32 mali_gp_job_get_gp_counter_src1(void);
+mali_bool mali_gp_job_set_gp_counter_src1(u32 counter);
 
 MALI_STATIC_INLINE u32 mali_gp_job_get_id(struct mali_gp_job *job)
 {
@@ -120,6 +127,16 @@ MALI_STATIC_INLINE u32 mali_gp_job_get_perf_counter_value0(struct mali_gp_job *j
 MALI_STATIC_INLINE u32 mali_gp_job_get_perf_counter_value1(struct mali_gp_job *job)
 {
 	return job->perf_counter_value1;
+}
+
+MALI_STATIC_INLINE void mali_gp_job_set_perf_counter_src0(struct mali_gp_job *job, u32 src)
+{
+	job->uargs.perf_counter_src0 = src;
+}
+
+MALI_STATIC_INLINE void mali_gp_job_set_perf_counter_src1(struct mali_gp_job *job, u32 src)
+{
+	job->uargs.perf_counter_src1 = src;
 }
 
 MALI_STATIC_INLINE void mali_gp_job_set_perf_counter_value0(struct mali_gp_job *job, u32 value)

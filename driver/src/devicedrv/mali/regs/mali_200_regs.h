@@ -46,14 +46,10 @@ enum mali200_mgmt_reg
 
 enum mali200_mgmt_ctrl_mgmt {
 	MALI200_REG_VAL_CTRL_MGMT_STOP_BUS         = (1<<0),
-#if defined(USING_MALI200)
 	MALI200_REG_VAL_CTRL_MGMT_FLUSH_CACHES     = (1<<3),
-#endif
 	MALI200_REG_VAL_CTRL_MGMT_FORCE_RESET      = (1<<5),
 	MALI200_REG_VAL_CTRL_MGMT_START_RENDERING  = (1<<6),
-#if defined(USING_MALI400) || defined(USING_MALI450)
-	MALI400PP_REG_VAL_CTRL_MGMT_SOFT_RESET     = (1<<7),
-#endif
+	MALI400PP_REG_VAL_CTRL_MGMT_SOFT_RESET     = (1<<7), /* Only valid for Mali-300 and later */
 };
 
 enum mali200_mgmt_irq {
@@ -72,18 +68,6 @@ enum mali200_mgmt_irq {
 	MALI400PP_REG_VAL_IRQ_RESET_COMPLETED       = (1<<12),
 };
 
-#if defined(USING_MALI200)
-#define MALI200_REG_VAL_IRQ_MASK_ALL  ((enum mali200_mgmt_irq) (\
-    MALI200_REG_VAL_IRQ_END_OF_FRAME                           |\
-    MALI200_REG_VAL_IRQ_END_OF_TILE                            |\
-    MALI200_REG_VAL_IRQ_HANG                                   |\
-    MALI200_REG_VAL_IRQ_FORCE_HANG                             |\
-    MALI200_REG_VAL_IRQ_BUS_ERROR                              |\
-    MALI200_REG_VAL_IRQ_BUS_STOP                               |\
-    MALI200_REG_VAL_IRQ_CNT_0_LIMIT                            |\
-    MALI200_REG_VAL_IRQ_CNT_1_LIMIT                            |\
-    MALI200_REG_VAL_IRQ_WRITE_BOUNDARY_ERROR))
-#elif defined(USING_MALI400) || defined(USING_MALI450)
 #define MALI200_REG_VAL_IRQ_MASK_ALL  ((enum mali200_mgmt_irq) (\
     MALI200_REG_VAL_IRQ_END_OF_FRAME                           |\
     MALI200_REG_VAL_IRQ_END_OF_TILE                            |\
@@ -98,31 +82,15 @@ enum mali200_mgmt_irq {
     MALI400PP_REG_VAL_IRQ_CALL_STACK_UNDERFLOW                   |\
     MALI400PP_REG_VAL_IRQ_CALL_STACK_OVERFLOW                    |\
     MALI400PP_REG_VAL_IRQ_RESET_COMPLETED))
-#else
-#error "No supported mali core defined"
-#endif
 
-#if defined(USING_MALI200)
 #define MALI200_REG_VAL_IRQ_MASK_USED ((enum mali200_mgmt_irq) (\
     MALI200_REG_VAL_IRQ_END_OF_FRAME                           |\
-    MALI200_REG_VAL_IRQ_HANG                                   |\
     MALI200_REG_VAL_IRQ_FORCE_HANG                             |\
     MALI200_REG_VAL_IRQ_BUS_ERROR                              |\
-    MALI200_REG_VAL_IRQ_WRITE_BOUNDARY_ERROR))
-#elif defined(USING_MALI400) || defined(USING_MALI450)
-#define MALI200_REG_VAL_IRQ_MASK_USED ((enum mali200_mgmt_irq) (\
-    MALI200_REG_VAL_IRQ_END_OF_FRAME                           |\
-    MALI200_REG_VAL_IRQ_HANG                                   |\
-    MALI200_REG_VAL_IRQ_FORCE_HANG                             |\
-    MALI200_REG_VAL_IRQ_BUS_ERROR                              |\
-    MALI200_REG_VAL_IRQ_BUS_STOP                               |\
     MALI200_REG_VAL_IRQ_WRITE_BOUNDARY_ERROR                   |\
     MALI400PP_REG_VAL_IRQ_INVALID_PLIST_COMMAND                  |\
     MALI400PP_REG_VAL_IRQ_CALL_STACK_UNDERFLOW                   |\
     MALI400PP_REG_VAL_IRQ_CALL_STACK_OVERFLOW))
-#else
-#error "No supported mali core defined"
-#endif
 
 #define MALI200_REG_VAL_IRQ_MASK_NONE ((enum mali200_mgmt_irq)(0))
 
@@ -134,18 +102,11 @@ enum mali200_mgmt_status {
 enum mali200_render_unit
 {
 	MALI200_REG_ADDR_FRAME = 0x0000,
-	MALI200_REG_ADDR_STACK = 0x0030
+	MALI200_REG_ADDR_RSW   = 0x0004,
+	MALI200_REG_ADDR_STACK = 0x0030,
+	MALI200_REG_ADDR_STACK_SIZE = 0x0034,
+	MALI200_REG_ADDR_ORIGIN_OFFSET_X  = 0x0040
 };
-
-#if defined(USING_MALI200)
-#define MALI200_NUM_REGS_FRAME ((0x04C/4)+1)
-#elif defined(USING_MALI400)
-#define MALI200_NUM_REGS_FRAME ((0x058/4)+1)
-#elif defined(USING_MALI450)
-#define MALI200_NUM_REGS_FRAME ((0x058/4)+1)
-#else
-#error "No supported mali core defined"
-#endif
 
 enum mali200_wb_unit {
     MALI200_REG_ADDR_WB0 = 0x0100,
@@ -156,11 +117,6 @@ enum mali200_wb_unit {
 enum mali200_wb_unit_regs {
 	MALI200_REG_ADDR_WB_SOURCE_SELECT = 0x0000,
 };
-
-/** The number of registers in one single writeback unit */
-#ifndef MALI200_NUM_REGS_WBx
-#define MALI200_NUM_REGS_WBx ((0x02C/4)+1)
-#endif
 
 /* This should be in the top 16 bit of the version register of Mali PP */
 #define MALI200_PP_PRODUCT_ID 0xC807

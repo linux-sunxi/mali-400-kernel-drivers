@@ -8,7 +8,6 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 #include "mali_kernel_common.h"
-#include "mali_kernel_core.h"
 #include "mali_kernel_memory_engine.h"
 #include "mali_block_allocator.h"
 #include "mali_osk.h"

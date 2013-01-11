@@ -26,8 +26,8 @@ struct mali_hw_core
 	const char* description;          /**< Name of unit (as specified in device configuration) */
 };
 
-#define MALI_HW_CORE_NO_COUNTER     ((u32)-1)
-#define MALI_HW_CORE_INVALID_VALUE  ((u32)-1)
+#define MALI_REG_POLL_COUNT_FAST 1000
+#define MALI_REG_POLL_COUNT_SLOW 1000000
 
 _mali_osk_errcode_t mali_hw_core_create(struct mali_hw_core *core, const _mali_osk_resource_t *resource, u32 reg_size);
 void mali_hw_core_delete(struct mali_hw_core *core);

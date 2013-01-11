@@ -13,7 +13,7 @@
 
 #include "mali_osk.h"
 
-_mali_osk_errcode_t mali_mem_validation_add_range(const _mali_osk_resource_t * resource);
+_mali_osk_errcode_t mali_mem_validation_add_range(u32 start, u32 size);
 _mali_osk_errcode_t mali_mem_validation_check(u32 phys_addr, u32 size);
 
 #endif /* __MALI_MEM_VALIDATION_H__ */

@@ -50,13 +50,15 @@ typedef struct _lock_item_s
 #define _LOCK_IOCTL_PROCESS_CMD 1   /* process kernel lock item       */
 #define _LOCK_IOCTL_RELEASE_CMD 2   /* release kernel lock item       */
 #define _LOCK_IOCTL_ZAP_CMD     3   /* clean up all kernel lock items */
+#define _LOCK_IOCTL_DUMP_CMD    4   /* dump all the items */
 
-#define LOCK_IOCTL_MAX_CMDS    4
+#define LOCK_IOCTL_MAX_CMDS     5
 
 #define LOCK_IOCTL_CREATE  _IOW( LOCK_IOCTL_GROUP, _LOCK_IOCTL_CREATE_CMD,  _lock_item_s )
 #define LOCK_IOCTL_PROCESS _IOW( LOCK_IOCTL_GROUP, _LOCK_IOCTL_PROCESS_CMD, _lock_item_s )
 #define LOCK_IOCTL_RELEASE _IOW( LOCK_IOCTL_GROUP, _LOCK_IOCTL_RELEASE_CMD, _lock_item_s )
 #define LOCK_IOCTL_ZAP     _IO ( LOCK_IOCTL_GROUP, _LOCK_IOCTL_ZAP_CMD )
+#define LOCK_IOCTL_DUMP    _IO ( LOCK_IOCTL_GROUP, _LOCK_IOCTL_DUMP_CMD )
 
 #ifdef __cplusplus
 }
